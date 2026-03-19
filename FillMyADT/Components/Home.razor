@@ -13,20 +13,24 @@
 
     <div class="controls">
         <div class="date-selector">
-            <label for="selectedDate">Select Date:</label>
-            <input type="date"
-                   id="selectedDate"
-                   @bind="selectedDate"
-                   @bind:after="LoadEventsAsync"
-                   max="@DateTime.Today.ToString("yyyy-MM-dd")" />
+            <label>Select Date:</label>
+            <div class="date-picker-wrapper">
+                <input type="date"
+                       @bind="selectedDate"
+                       @bind:after="LoadEventsAsync"
+                       max="@DateTime.Today.ToString("yyyy-MM-dd")"
+                       class="enhanced-date-input" />
+                <div class="quick-date-buttons">
+                    <button class="quick-btn" @onclick="LoadYesterdayAsync" title="Yesterday">Y</button>
+                    <button class="quick-btn" @onclick="LoadTodayAsync" title="Today">T</button>
+                </div>
+            </div>
         </div>
 
         <div class="quick-actions">
             <button class="btn btn-arrow" @onclick="LoadPreviousDayAsync" title="Previous Day">
                 ◀
             </button>
-            <button class="btn" @onclick="LoadTodayAsync">Today</button>
-            <button class="btn" @onclick="LoadYesterdayAsync">Yesterday</button>
             <button class="btn btn-arrow" @onclick="LoadNextDayAsync" title="Next Day" disabled="@(selectedDate >= DateTime.Today)">
                 ▶
             </button>
@@ -305,20 +309,86 @@
     .date-selector {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 6px;
+        min-width: 220px;
     }
 
         .date-selector label {
             font-weight: 600;
             color: #495057;
-            font-size: 12px;
+            font-size: 13px;
+            margin-bottom: 2px;
         }
 
-        .date-selector input {
-            padding: 5px 8px;
-            border: 1px solid #ced4da;
-            border-radius: 3px;
-            font-size: 13px;
+    .date-picker-wrapper {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+    }
+
+    .enhanced-date-input {
+        flex: 1;
+        padding: 8px 12px;
+        border: 2px solid #ced4da;
+        border-radius: 6px;
+        font-size: 14px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        transition: all 0.2s ease;
+        background-color: white;
+        cursor: pointer;
+    }
+
+        .enhanced-date-input:hover {
+            border-color: #0078d4;
+        }
+
+        .enhanced-date-input:focus {
+            outline: none;
+            border-color: #0078d4;
+            box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.1);
+        }
+
+        .enhanced-date-input::-webkit-calendar-picker-indicator {
+            cursor: pointer;
+            font-size: 16px;
+            padding: 4px;
+            border-radius: 4px;
+        }
+
+            .enhanced-date-input::-webkit-calendar-picker-indicator:hover {
+                background-color: #f0f0f0;
+            }
+
+    .quick-date-buttons {
+        display: flex;
+        gap: 4px;
+    }
+
+    .quick-btn {
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        border: 2px solid #0078d4;
+        background-color: white;
+        color: #0078d4;
+        font-weight: 600;
+        font-size: 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+        .quick-btn:hover {
+            background-color: #0078d4;
+            color: white;
+            transform: translateY(-1px);
+        }
+
+        .quick-btn:active {
+            transform: translateY(0);
         }
 
     .quick-actions {

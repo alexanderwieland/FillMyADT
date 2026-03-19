@@ -1,8 +1,9 @@
-using System.Diagnostics;
-using System.Text.RegularExpressions;
 using FillMyADT.Models;
 using FillMyADT.Models.Configuration;
 using Serilog;
+using System.Diagnostics;
+using System.IO;
+using System.Text.RegularExpressions;
 
 namespace FillMyADT.Services.EventSources;
 
@@ -15,6 +16,11 @@ public class GitEventSource : IEventSource
     private readonly List<string> _repositoryPaths;
     private static readonly Regex _reflogPattern = new(@"(?<ref>[^\s]+)\s+HEAD@{[^}]+}:\s+(?<action>.+?):\s+(?<date>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", RegexOptions.Compiled);
     private readonly Regex _ticketPattern;
+
+    // Performance constants
+    private const int MaxCommitsPerRepo = 100;  // Limit commits per repo
+    private const int MaxReflogEntries = 50;    // Limit reflog entries
+    private const int GitCommandTimeoutSeconds = 10;  // Timeout for git commands
 
     public string Name => "Git History";
 
@@ -72,6 +78,7 @@ public class GitEventSource : IEventSource
             return [];
         }
 
+        var stopwatch = Stopwatch.StartNew();
         var reposToScan = _repositoryPaths;
 
         if (_config.FilterByRecentActivity)
@@ -79,20 +86,28 @@ public class GitEventSource : IEventSource
             var activeRepos = new List<string>();
             foreach (var repoPath in _repositoryPaths)
             {
-                var repoName = System.IO.Path.GetFileName(repoPath);
+                var repoName = Path.GetFileName(repoPath);
                 if (await HasRecentActivityAsync(repoPath, startDate, endDate, cancellationToken))
                 {
                     activeRepos.Add(repoPath);
                 }
             }
             reposToScan = activeRepos;
+            Log.Information("GitEventSource: Scanning {ActiveCount} of {TotalCount} repositories with recent activity",
+                activeRepos.Count, _repositoryPaths.Count);
+        }
+
+        if (reposToScan.Count == 0)
+        {
+            Log.Information("GitEventSource: No repositories with activity in date range");
+            return [];
         }
 
         var allEvents = new List<Event>();
 
         foreach (var repoPath in reposToScan)
         {
-            var repoName = System.IO.Path.GetFileName(repoPath);
+            var repoName = Path.GetFileName(repoPath);
             try
             {
                 var events = await GetEventsFromRepositoryAsync(repoPath, startDate, endDate, cancellationToken);
@@ -104,6 +119,10 @@ public class GitEventSource : IEventSource
                 Log.Error(ex, "GitEventSource: error reading Git events from repository {RepoName} ({Path})", repoName, repoPath);
             }
         }
+
+        stopwatch.Stop();
+        Log.Information("GitEventSource: Found {EventCount} events from {RepoCount} repositories in {ElapsedMs}ms",
+            allEvents.Count, reposToScan.Count, stopwatch.ElapsedMilliseconds);
 
         return allEvents.OrderBy(e => e.Timestamp);
     }
@@ -130,20 +149,22 @@ public class GitEventSource : IEventSource
     private async Task<IEnumerable<Event>> GetCommitsAsync(string repoPath, DateTime startDate, DateTime endDate, CancellationToken cancellationToken)
     {
         var events = new List<Event>();
-        var repoName = System.IO.Path.GetFileName(repoPath);
+        var repoName = Path.GetFileName(repoPath);
 
         try
         {
             var sinceArg = startDate.ToString("yyyy-MM-dd HH:mm:ss");
             var untilArg = endDate.ToString("yyyy-MM-dd HH:mm:ss");
 
+            // OPTIMIZATION: Use HEAD instead of --all for faster queries
             var branchesArg = _config.IncludeBranches.Count > 0
                 ? string.Join(" ", _config.IncludeBranches)
-                : "--all";
+                : "HEAD";  // Changed from --all to HEAD for performance
 
+            // OPTIMIZATION: Add limit to prevent fetching thousands of commits
             var output = await RunGitCommandAsync(
                 repoPath,
-                $"log {branchesArg} --since=\"{sinceArg}\" --until=\"{untilArg}\" --format=\"%H|%aI|%s|%an|%ae|%D\"",
+                $"log {branchesArg} --since=\"{sinceArg}\" --until=\"{untilArg}\" --format=\"%H|%aI|%s|%an|%ae|%D\" -n {MaxCommitsPerRepo}",
                 cancellationToken);
 
             if (string.IsNullOrWhiteSpace(output))
@@ -159,13 +180,13 @@ public class GitEventSource : IEventSource
                     var author = parts[3];
                     var email = parts[4];
 
-                    if (!string.IsNullOrWhiteSpace(_config.FilterByAuthorName) && 
+                    if (!string.IsNullOrWhiteSpace(_config.FilterByAuthorName) &&
                         !author.Contains(_config.FilterByAuthorName, StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(_config.FilterByAuthorEmail) && 
+                    if (!string.IsNullOrWhiteSpace(_config.FilterByAuthorEmail) &&
                         !email.Contains(_config.FilterByAuthorEmail, StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
@@ -223,11 +244,15 @@ public class GitEventSource : IEventSource
     private async Task<IEnumerable<Event>> GetReflogEventsAsync(string repoPath, DateTime startDate, DateTime endDate, CancellationToken cancellationToken)
     {
         var events = new List<Event>();
-        var repoName = System.IO.Path.GetFileName(repoPath);
+        var repoName = Path.GetFileName(repoPath);
 
         try
         {
-            var output = await RunGitCommandAsync(repoPath, "reflog --date=iso", cancellationToken);
+            // CRITICAL OPTIMIZATION: Add limit to reflog command to prevent fetching thousands of entries
+            var output = await RunGitCommandAsync(
+                repoPath,
+                $"reflog --date=iso -n {MaxReflogEntries}",
+                cancellationToken);
 
             if (string.IsNullOrWhiteSpace(output))
                 return events;
@@ -239,6 +264,10 @@ public class GitEventSource : IEventSource
                 var match = _reflogPattern.Match(line);
                 if (match.Success && DateTime.TryParse(match.Groups["date"].Value, out var timestamp))
                 {
+                    // OPTIMIZATION: Break early if we're past the date range (reflog is chronological)
+                    if (timestamp < startDate)
+                        break;
+
                     if (timestamp >= startDate && timestamp <= endDate)
                     {
                         var action = match.Groups["action"].Value;
@@ -299,10 +328,23 @@ public class GitEventSource : IEventSource
         if (process == null)
             return string.Empty;
 
-        var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
+        // OPTIMIZATION: Add timeout to prevent hanging
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(GitCommandTimeoutSeconds));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
-        return process.ExitCode == 0 ? output : string.Empty;
+        try
+        {
+            var output = await process.StandardOutput.ReadToEndAsync(linkedCts.Token);
+            await process.WaitForExitAsync(linkedCts.Token);
+
+            return process.ExitCode == 0 ? output : string.Empty;
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+        {
+            Log.Warning("Git command timed out after {Seconds}s: git {Arguments}", GitCommandTimeoutSeconds, arguments);
+            try { process.Kill(); } catch { }
+            return string.Empty;
+        }
     }
 
     public async Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default)
@@ -390,20 +432,21 @@ public class GitEventSource : IEventSource
 
     private async Task<bool> HasRecentActivityAsync(string repoPath, DateTime startDate, DateTime endDate, CancellationToken cancellationToken)
     {
-        var repoName = System.IO.Path.GetFileName(repoPath);
+        var repoName = Path.GetFileName(repoPath);
         try
         {
+            // OPTIMIZATION: Check files first (very fast!)
             if (_config.UseFetchHeadFilter)
             {
-                var gitDir = System.IO.Path.Combine(repoPath, ".git");
+                var gitDir = Path.Combine(repoPath, ".git");
                 var filesToCheck = new[] { "FETCH_HEAD", "HEAD", "index" };
 
                 foreach (var fileName in filesToCheck)
                 {
-                    var filePath = System.IO.Path.Combine(gitDir, fileName);
-                    if (System.IO.File.Exists(filePath))
+                    var filePath = Path.Combine(gitDir, fileName);
+                    if (File.Exists(filePath))
                     {
-                        var lastModified = System.IO.File.GetLastWriteTime(filePath);
+                        var lastModified = File.GetLastWriteTime(filePath);
                         if (lastModified >= startDate && lastModified <= endDate)
                         {
                             return true;
@@ -412,12 +455,13 @@ public class GitEventSource : IEventSource
                 }
             }
 
+            // OPTIMIZATION: Use HEAD instead of --all for faster activity check
             var sinceArg = startDate.ToString("yyyy-MM-dd HH:mm:ss");
             var untilArg = endDate.ToString("yyyy-MM-dd HH:mm:ss");
 
             var output = await RunGitCommandAsync(
                 repoPath,
-                $"log --all --since=\"{sinceArg}\" --until=\"{untilArg}\" --format=\"%H\" -n 1",
+                $"log HEAD --since=\"{sinceArg}\" --until=\"{untilArg}\" --format=\"%H\" -n 1",
                 cancellationToken);
 
             return !string.IsNullOrWhiteSpace(output);
@@ -516,21 +560,19 @@ public class GitEventSource : IEventSource
 
         try
         {
-            // Get reflog with timestamps to find branch checkouts before the specified time
-            var output = await RunGitCommandAsync(_repositoryPaths[0], "reflog --date=iso", cancellationToken);
+            // OPTIMIZATION: Limit reflog entries for historical queries
+            var output = await RunGitCommandAsync(_repositoryPaths[0], $"reflog --date=iso -n {MaxReflogEntries}", cancellationToken);
 
             if (string.IsNullOrWhiteSpace(output))
-                return await GetCurrentBranchAsync(cancellationToken); // Fallback to current branch
+                return await GetCurrentBranchAsync(cancellationToken);
 
             var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
-            // Parse reflog entries to find the last branch checkout before the specified time
             foreach (var line in lines)
             {
                 var match = _reflogPattern.Match(line);
                 if (match.Success && DateTime.TryParse(match.Groups["date"].Value, out var entryTime))
                 {
-                    // Find entries that occurred at or before the target time
                     if (entryTime <= time)
                     {
                         var action = match.Groups["action"].Value;
@@ -539,7 +581,7 @@ public class GitEventSource : IEventSource
                             var branchName = ExtractBranchNameFromCheckout(action);
                             if (!string.IsNullOrEmpty(branchName))
                             {
-                                Log.Debug("Branch at {Time}: {Branch} (from reflog entry at {EntryTime})", 
+                                Log.Debug("Branch at {Time}: {Branch} (from reflog entry at {EntryTime})",
                                     time, branchName, entryTime);
                                 return branchName;
                             }
@@ -548,7 +590,6 @@ public class GitEventSource : IEventSource
                 }
             }
 
-            // If no checkout found before this time, use current branch
             return await GetCurrentBranchAsync(cancellationToken);
         }
         catch (Exception ex)

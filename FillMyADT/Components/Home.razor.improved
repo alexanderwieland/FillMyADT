@@ -1,0 +1,207 @@
+@page "/"
+@using FillMyADT.Services
+@using FillMyADT.Models
+@inject EventAggregatorService EventAggregator
+@inject EventToTimeSpanConverter TimeSlotConverter
+@inject ClipboardFormatterService ClipboardFormatter
+@inject NotificationService Notifications
+@inject IJSRuntime JSRuntime
+@implements IDisposable
+
+<link href="css/home.css" rel="stylesheet" />
+
+<div class="home-container">
+    <h1>Daily Activity Tracker</h1>
+    <p>Track your daily activities from Windows events and Git history</p>
+
+    <div class="controls">
+        <div class="date-selector">
+            <label>Select Date:</label>
+            <div class="date-picker-wrapper">
+                <input type="date"
+                       @bind="selectedDate"
+                       @bind:after="LoadEventsAsync"
+                       max="@DateNavigationHelper.Today.ToString("yyyy-MM-dd")"
+                       class="enhanced-date-input" />
+                <div class="quick-date-buttons">
+                    <button class="quick-btn" @onclick="() => NavigateToDateAsync(DateNavigationHelper.Yesterday)" title="Yesterday">Y</button>
+                    <button class="quick-btn" @onclick="() => NavigateToDateAsync(DateNavigationHelper.Today)" title="Today">T</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="quick-actions">
+            <button class="btn btn-arrow" @onclick="() => NavigateByDaysAsync(-1)" title="Previous Day">◀</button>
+            <button class="btn btn-arrow" @onclick="() => NavigateByDaysAsync(1)" title="Next Day" disabled="@(!DateNavigationHelper.CanNavigateToNextDay(selectedDate))">▶</button>
+            <button class="btn" @onclick="LoadEventsAsync" disabled="@isLoading">@(isLoading ? "Loading..." : "Refresh")</button>
+            <button class="btn btn-copy" @onclick="CopyEventsAsync" disabled="@(!HasEvents)" title="Copy Events to Clipboard">📋 Copy Events</button>
+            <button class="btn btn-copy" @onclick="CopyTimeSlotsAsync" disabled="@(!HasTimeSlots)" title="Copy Time Slots to Clipboard">⏱️ Copy Slots</button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="error-message">@errorMessage</div>
+    }
+
+    @if (!string.IsNullOrEmpty(successMessage))
+    {
+        <div class="success-message">@successMessage</div>
+    }
+
+    @if (availableSources != null && availableSources.Any())
+    {
+        <div class="sources-info">
+            <strong>Active Sources:</strong> @string.Join(", ", availableSources)
+        </div>
+    }
+
+    <div class="view-switcher">
+        <button class="view-btn @(currentView == ViewMode.Events ? "active" : "")" @onclick="() => currentView = ViewMode.Events">
+            📋 Events
+        </button>
+        <button class="view-btn @(currentView == ViewMode.TimeSlots ? "active" : "")" @onclick="() => currentView = ViewMode.TimeSlots">
+            ⏱️ Time Slots
+        </button>
+    </div>
+
+    @if (currentView == ViewMode.Events)
+    {
+        <EventList Events="@events" IsLoading="@isLoading" />
+    }
+    else
+    {
+        <TimeSlotList TimeSlots="@timeSlots" IsLoading="@isLoading" />
+    }
+</div>
+
+@code {
+    private enum ViewMode { Events, TimeSlots }
+
+    private DateTime selectedDate = DateNavigationHelper.Yesterday;
+    private IReadOnlyList<Event>? events;
+    private IReadOnlyList<TimeSlot>? timeSlots;
+    private IEnumerable<string>? availableSources;
+    private bool isLoading;
+    private string? errorMessage;
+    private string? successMessage;
+    private CancellationTokenSource? _loadCancellationTokenSource;
+    private ViewMode currentView = ViewMode.TimeSlots;
+
+    private bool HasEvents => events != null && events.Any();
+    private bool HasTimeSlots => timeSlots != null && timeSlots.Any();
+
+    protected override async Task OnInitializedAsync()
+    {
+        SetupNotifications();
+        await LoadAvailableSourcesAsync();
+        await LoadEventsAsync();
+    }
+
+    private void SetupNotifications()
+    {
+        Notifications.OnError += message => { errorMessage = message; StateHasChanged(); };
+        Notifications.OnSuccess += message => { successMessage = message; StateHasChanged(); };
+        Notifications.OnClearMessages += () => { errorMessage = null; successMessage = null; StateHasChanged(); };
+    }
+
+    private async Task LoadAvailableSourcesAsync()
+    {
+        try
+        {
+            availableSources = await EventAggregator.GetAvailableSourcesAsync();
+        }
+        catch (Exception ex)
+        {
+            Notifications.ShowError($"Error loading sources: {ex.Message}");
+        }
+    }
+
+    private async Task NavigateToDateAsync(DateTime date)
+    {
+        selectedDate = DateNavigationHelper.ClampToToday(date);
+        await LoadEventsAsync();
+    }
+
+    private async Task NavigateByDaysAsync(int days)
+    {
+        var newDate = selectedDate.AddDays(days);
+        await NavigateToDateAsync(newDate);
+    }
+
+    private async Task LoadEventsAsync()
+    {
+        await _loadCancellationTokenSource.CancelAndDisposeAsync();
+        _loadCancellationTokenSource = new CancellationTokenSource();
+
+        var cancellationToken = _loadCancellationTokenSource.Token;
+
+        isLoading = true;
+        Notifications.ClearMessages();
+        StateHasChanged();
+
+        try
+        {
+            events = await EventAggregator.GetEventsForDayAsync(selectedDate, cancellationToken);
+            timeSlots = HasEvents 
+                ? TimeSlotConverter.ConvertEventsToTimeSlots(events) 
+                : Array.Empty<TimeSlot>();
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled - ignore
+        }
+        catch (Exception ex)
+        {
+            Notifications.ShowError($"Error loading events: {ex.Message}");
+            events = Array.Empty<Event>();
+            timeSlots = Array.Empty<TimeSlot>();
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                isLoading = false;
+                StateHasChanged();
+            }
+        }
+    }
+
+    private async Task CopyEventsAsync()
+    {
+        if (!HasEvents) return;
+
+        try
+        {
+            var formatted = ClipboardFormatter.FormatEvents(events!, selectedDate);
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", formatted);
+            Notifications.ShowSuccess("Events copied to clipboard!");
+        }
+        catch (Exception ex)
+        {
+            Notifications.ShowError($"Failed to copy events: {ex.Message}");
+        }
+    }
+
+    private async Task CopyTimeSlotsAsync()
+    {
+        if (!HasTimeSlots) return;
+
+        try
+        {
+            var formatted = ClipboardFormatter.FormatTimeSlots(timeSlots!, selectedDate);
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", formatted);
+            Notifications.ShowSuccess("Time slots copied to clipboard!");
+        }
+        catch (Exception ex)
+        {
+            Notifications.ShowError($"Failed to copy time slots: {ex.Message}");
+        }
+    }
+
+    public void Dispose()
+    {
+        _loadCancellationTokenSource?.Cancel();
+        _loadCancellationTokenSource?.Dispose();
+    }
+}

@@ -196,7 +196,8 @@ public class EventToTimeSpanConverter
             StartTime = firstSlotStart,
             EndTime = firstSlotEnd,
             TicketNr = null,
-            Text = "Startup"
+            Text = "Startup",
+            Category = TimeSlotCategory.Startup
         });
 
         // Create work and meeting slots
@@ -333,7 +334,8 @@ public class EventToTimeSpanConverter
                 StartTime = workStart,
                 EndTime = workEnd,
                 TicketNr = GetTicketNumberFromEvents(workEvents, slotTime, date, branchHistory),
-                Text = GetWorkDescription(workEvents)
+                Text = GetWorkDescription(workEvents),
+                Category = TimeSlotCategory.Work
             });
             return;
         }
@@ -375,7 +377,8 @@ public class EventToTimeSpanConverter
                 StartTime = workStart,
                 EndTime = breakStart,
                 TicketNr = GetTicketNumberFromEvents(morningEvents.Any() ? morningEvents : workEvents, morningSlotTime, date, branchHistory),
-                Text = GetWorkDescription(morningEvents.Any() ? morningEvents : workEvents)
+                Text = GetWorkDescription(morningEvents.Any() ? morningEvents : workEvents),
+                Category = TimeSlotCategory.Work
             });
         }
 
@@ -389,7 +392,8 @@ public class EventToTimeSpanConverter
                 StartTime = breakEnd,
                 EndTime = workEnd,
                 TicketNr = GetTicketNumberFromEvents(afternoonEvents.Any() ? afternoonEvents : (morningEvents.Any() ? morningEvents : workEvents), afternoonSlotTime, date, branchHistory),
-                Text = afternoonEvents.Any() ? GetWorkDescription(afternoonEvents) : GetWorkDescription(morningEvents.Any() ? morningEvents : workEvents)
+                Text = afternoonEvents.Any() ? GetWorkDescription(afternoonEvents) : GetWorkDescription(morningEvents.Any() ? morningEvents : workEvents),
+                Category = TimeSlotCategory.Work
             });
         }
     }
@@ -468,7 +472,8 @@ public class EventToTimeSpanConverter
                         EndTime = lunchBreak.Value.Start,
                         TicketNr = GetTicketNumberFromEvents(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents, slotTime, date, branchHistory),
                         Text = GetWorkDescription(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents),
-                        Location = null
+                        Location = null,
+                        Category = TimeSlotCategory.Work
                     });
                 }
 
@@ -492,11 +497,13 @@ public class EventToTimeSpanConverter
                     EndTime = meeting.Start,
                     TicketNr = GetTicketNumberFromEvents(eventsInPeriod.Any() ? eventsInPeriod : workEvents, slotTime, date, branchHistory),
                     Text = GetWorkDescription(eventsInPeriod.Any() ? eventsInPeriod : workEvents),
-                    Location = null
+                    Location = null,
+                    Category = TimeSlotCategory.Work
                 });
             }
 
             // Add meeting slot
+            var category = meeting.Subject == "Lunch Break" ? TimeSlotCategory.Break : TimeSlotCategory.Meeting;
             timeSlots.Add(new TimeSlot
             {
                 Date = date,
@@ -504,7 +511,8 @@ public class EventToTimeSpanConverter
                 EndTime = meeting.End,
                 TicketNr = null,
                 Text = meeting.Subject,
-                Location = meeting.Location
+                Location = meeting.Location,
+                Category = category
             });
 
             currentTime = meeting.End;
@@ -529,7 +537,8 @@ public class EventToTimeSpanConverter
                     EndTime = lunchBreak.Value.Start,
                     TicketNr = GetTicketNumberFromEvents(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents, slotTime, date, branchHistory),
                     Text = GetWorkDescription(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents),
-                    Location = null
+                    Location = null,
+                    Category = TimeSlotCategory.Work
                 });
             }
 
@@ -552,7 +561,8 @@ public class EventToTimeSpanConverter
                 EndTime = workEnd,
                 TicketNr = GetTicketNumberFromEvents(eventsInPeriod.Any() ? eventsInPeriod : workEvents, slotTime, date, branchHistory),
                 Text = GetWorkDescription(eventsInPeriod.Any() ? eventsInPeriod : workEvents),
-                Location = null
+                Location = null,
+                Category = TimeSlotCategory.Work
             });
         }
     }

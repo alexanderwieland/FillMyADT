@@ -120,6 +120,12 @@ namespace FillMyADT
             // Register converter service
             serviceCollection.AddSingleton<EventToTimeSpanConverter>();
 
+            // Register clipboard formatter
+            serviceCollection.AddSingleton<ClipboardFormatterService>();
+
+            // Register notification service
+            serviceCollection.AddSingleton<NotificationService>();
+
             return serviceCollection.BuildServiceProvider();
         }
 

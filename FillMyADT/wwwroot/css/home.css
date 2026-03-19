@@ -1,0 +1,220 @@
+/* Home Component Styles */
+
+.home-container {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.home-container h1 {
+    color: #0078d4;
+    margin-bottom: 5px;
+    font-size: 1.5rem;
+    margin-top: 0;
+}
+
+/* Controls Section */
+.controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin: 15px 0;
+    padding: 10px;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+}
+
+/* Date Selector */
+.date-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 220px;
+}
+
+.date-selector label {
+    font-weight: 600;
+    color: #495057;
+    font-size: 13px;
+    margin-bottom: 2px;
+}
+
+.date-picker-wrapper {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.enhanced-date-input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 2px solid #ced4da;
+    border-radius: 6px;
+    font-size: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    transition: all 0.2s ease;
+    background-color: white;
+    cursor: pointer;
+}
+
+.enhanced-date-input:hover {
+    border-color: #0078d4;
+}
+
+.enhanced-date-input:focus {
+    outline: none;
+    border-color: #0078d4;
+    box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.1);
+}
+
+.enhanced-date-input::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px;
+    border-radius: 4px;
+}
+
+.enhanced-date-input::-webkit-calendar-picker-indicator:hover {
+    background-color: #f0f0f0;
+}
+
+.quick-date-buttons {
+    display: flex;
+    gap: 4px;
+}
+
+.quick-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 2px solid #0078d4;
+    background-color: white;
+    color: #0078d4;
+    font-weight: 600;
+    font-size: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.quick-btn:hover {
+    background-color: #0078d4;
+    color: white;
+    transform: translateY(-1px);
+}
+
+.quick-btn:active {
+    transform: translateY(0);
+}
+
+/* Quick Actions */
+.quick-actions {
+    display: flex;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.btn {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    background-color: #0078d4;
+    color: white;
+    font-size: 13px;
+    transition: background-color 0.2s;
+}
+
+.btn:hover:not(:disabled) {
+    background-color: #106ebe;
+}
+
+.btn:disabled {
+    background-color: #6c757d;
+    cursor: not-allowed;
+}
+
+.btn-arrow {
+    min-width: 36px;
+    padding: 6px;
+    font-size: 14px;
+}
+
+.btn-copy {
+    background-color: #28a745;
+    font-size: 12px;
+    padding: 6px 10px;
+}
+
+.btn-copy:hover:not(:disabled) {
+    background-color: #218838;
+}
+
+.btn-copy:disabled {
+    background-color: #6c757d;
+}
+
+/* Messages */
+.sources-info {
+    padding: 8px 10px;
+    background-color: #d1ecf1;
+    border-left: 3px solid #0c5460;
+    color: #0c5460;
+    border-radius: 3px;
+    margin-bottom: 10px;
+    font-size: 12px;
+}
+
+.error-message {
+    padding: 8px 10px;
+    background-color: #f8d7da;
+    border-left: 3px solid #721c24;
+    color: #721c24;
+    border-radius: 3px;
+    margin-bottom: 10px;
+    font-size: 12px;
+}
+
+.success-message {
+    padding: 8px 10px;
+    background-color: #d4edda;
+    border-left: 3px solid #155724;
+    color: #155724;
+    border-radius: 3px;
+    margin-bottom: 10px;
+    font-size: 12px;
+}
+
+/* View Switcher */
+.view-switcher {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 15px;
+    padding: 3px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+    width: fit-content;
+}
+
+.view-btn {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    background-color: transparent;
+    color: #495057;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+
+.view-btn:hover {
+    background-color: #dee2e6;
+}
+
+.view-btn.active {
+    background-color: #0078d4;
+    color: white;
+    font-weight: 600;
+}

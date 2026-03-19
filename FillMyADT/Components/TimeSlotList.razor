@@ -21,13 +21,13 @@ else
         <div class="timeslots">
             @foreach (var slot in TimeSlots)
             {
-                <div class="timeslot-item @(string.IsNullOrEmpty(slot.TicketNr) ? "no-ticket" : "has-ticket")">
+                <div class="timeslot-item @slot.CssClass">
                     <div class="timeslot-time">
                         <div class="time-range">
                             @slot.StartTime.ToString("HH:mm") - @slot.EndTime.ToString("HH:mm")
                         </div>
                         <div class="duration">
-                            @FormatDuration(slot.Duration)
+                            @slot.FormattedDuration
                         </div>
                     </div>
                     <div class="timeslot-details">
@@ -85,19 +85,6 @@ else
     [Parameter]
     public bool IsLoading { get; set; }
 
-    private static string FormatDuration(TimeSpan duration)
-    {
-        var totalMinutes = (int)duration.TotalMinutes;
-        var hours = totalMinutes / 60;
-        var minutes = totalMinutes % 60;
-
-        if (hours > 0)
-        {
-            return minutes > 0 ? $"{hours}h {minutes}m" : $"{hours}h";
-        }
-        return $"{minutes}m";
-    }
-
     private static string FormatTotalDuration(IReadOnlyList<TimeSlot> slots)
     {
         var totalMinutes = (int)slots.Sum(s => s.Duration.TotalMinutes);
@@ -139,14 +126,36 @@ else
         box-shadow: 0 1px 2px rgba(0,0,0,0.08);
     }
 
-    .timeslot-item.no-ticket {
-        border-left-color: #6c757d;
-        background-color: #f8f9fa;
+    /* Category-based styling */
+    .timeslot-item.category-startup {
+        border-left-color: #87ceeb; /* Light blue */
+        background-color: #f0f8ff; /* Alice blue background */
     }
 
-    .timeslot-item.has-ticket {
-        border-left-color: #28a745;
-        background-color: #f8fff9;
+    .timeslot-item.category-work {
+        border-left-color: #ffc107; /* Yellow */
+        background-color: #fffef0; /* Light yellow background */
+    }
+
+        .timeslot-item.category-work .ticket-badge {
+            background-color: #ffc107;
+            color: #000;
+            font-weight: 600;
+        }
+
+    .timeslot-item.category-meeting {
+        border-left-color: #0078d4; /* Blue */
+        background-color: #f0f7ff; /* Light blue background */
+    }
+
+    .timeslot-item.category-break {
+        border-left-color: #6c757d; /* Gray */
+        background-color: #f8f9fa; /* Light gray background */
+    }
+
+    .timeslot-item.category-default {
+        border-left-color: #6c757d;
+        background-color: #f8f9fa;
     }
 
     .timeslot-time {
@@ -184,8 +193,8 @@ else
     }
 
     .ticket-badge {
-        background-color: #ffc107;
-        color: #000;
+        background-color: #ff9800; /* Orange for better contrast with yellow background */
+        color: #fff;
         font-weight: 600;
         font-size: 11px;
         padding: 3px 8px;
