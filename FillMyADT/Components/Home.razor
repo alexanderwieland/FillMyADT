@@ -1,0 +1,522 @@
+@page "/"
+@using FillMyADT.Services
+@using FillMyADT.Models
+@using System.Text
+@inject EventAggregatorService EventAggregator
+@inject EventToTimeSpanConverter TimeSlotConverter
+@inject AdtXmlExportService AdtExportService
+@inject IJSRuntime JSRuntime
+@implements IDisposable
+
+<div class="home-container">
+    <h1>Daily Activity Tracker</h1>
+    <p>Track your daily activities from Windows events and Git history</p>
+
+    <div class="controls">
+        <!-- Date Navigation Section -->
+        <div class="date-section">
+            <button class="nav-arrow" @onclick="LoadPreviousDayAsync" title="Previous Day">
+                ◀
+            </button>
+            <input type="date"
+                   @bind="selectedDate"
+                   @bind:after="LoadEventsAsync"
+                   max="@DateTime.Today.ToString("yyyy-MM-dd")"
+                   class="date-input" />
+            <button class="nav-arrow" @onclick="LoadNextDayAsync" title="Next Day" disabled="@(selectedDate >= DateTime.Today)">
+                ▶
+            </button>
+            <button class="quick-date-btn" @onclick="LoadYesterdayAsync" title="Yesterday">Yesterday</button>
+            <button class="quick-date-btn" @onclick="LoadTodayAsync" title="Today">Today</button>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="action-buttons">
+            <button class="btn btn-refresh" @onclick="LoadEventsAsync" disabled="@isLoading">
+                @(isLoading ? "Loading..." : "🔄 Refresh")
+            </button>
+            <button class="btn btn-copy" @onclick="CopyEventsAsync" disabled="@(events == null || !events.Any())" title="Copy Events to Clipboard">
+                📋 Copy Events
+            </button>
+            <button class="btn btn-copy" @onclick="CopyTimeSlotsAsync" disabled="@(timeSlots == null || !timeSlots.Any())" title="Copy Time Slots to Clipboard">
+                ⏱️ Copy Slots
+            </button>
+            <button class="btn btn-export" @onclick="ExportToAdtAsync" disabled="@(timeSlots == null || !timeSlots.Any())" title="Export to ADT XML">
+                📤 Export to ADT
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="error-message">
+            @errorMessage
+        </div>
+    }
+
+    @if (availableSources != null && availableSources.Any())
+    {
+        <div class="sources-info">
+            <strong>Active Sources:</strong> @string.Join(", ", availableSources)
+        </div>
+    }
+
+    <div class="view-switcher">
+        <button class="view-btn @(currentView == ViewMode.Events ? "active" : "")" @onclick="() => SwitchView(ViewMode.Events)">
+            📋 Events
+        </button>
+        <button class="view-btn @(currentView == ViewMode.TimeSlots ? "active" : "")" @onclick="() => SwitchView(ViewMode.TimeSlots)">
+            ⏱️ Time Slots
+        </button>
+    </div>
+
+    @if (currentView == ViewMode.Events)
+    {
+        <EventList Events="@events" IsLoading="@isLoading" />
+    }
+    else
+    {
+        <TimeSlotList TimeSlots="@timeSlots" IsLoading="@isLoading" />
+    }
+</div>
+
+@code {
+    private enum ViewMode { Events, TimeSlots }
+
+    private DateTime selectedDate = DateTime.Today.AddDays(-1); // Start with yesterday
+    private IReadOnlyList<Event>? events;
+    private IReadOnlyList<TimeSlot>? timeSlots;
+    private IEnumerable<string>? availableSources;
+    private bool isLoading;
+    private string? errorMessage;
+    private CancellationTokenSource? _loadCancellationTokenSource;
+    private ViewMode currentView = ViewMode.TimeSlots;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAvailableSourcesAsync();
+        await LoadEventsAsync();
+    }
+
+    private async Task LoadAvailableSourcesAsync()
+    {
+        try
+        {
+            availableSources = await EventAggregator.GetAvailableSourcesAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading sources: {ex.Message}");
+        }
+    }
+
+    private async Task LoadEventsAsync()
+    {
+        _loadCancellationTokenSource?.Cancel();
+        _loadCancellationTokenSource?.Dispose();
+        _loadCancellationTokenSource = new CancellationTokenSource();
+
+        var cancellationToken = _loadCancellationTokenSource.Token;
+
+        isLoading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            events = await EventAggregator.GetEventsForDayAsync(selectedDate, cancellationToken);
+
+            // Convert events to time slots
+            if (events != null && events.Any())
+            {
+                timeSlots = TimeSlotConverter.ConvertEventsToTimeSlots(events);
+            }
+            else
+            {
+                timeSlots = Array.Empty<TimeSlot>();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled - don't show error
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error loading events: {ex.Message}";
+            events = Array.Empty<Event>();
+            timeSlots = Array.Empty<TimeSlot>();
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                isLoading = false;
+                StateHasChanged();
+            }
+        }
+    }
+
+    private async Task LoadTodayAsync()
+    {
+        selectedDate = DateTime.Today;
+        await LoadEventsAsync();
+    }
+
+    private async Task LoadYesterdayAsync()
+    {
+        selectedDate = DateTime.Today.AddDays(-1);
+        await LoadEventsAsync();
+    }
+
+    private async Task LoadPreviousDayAsync()
+    {
+        selectedDate = selectedDate.AddDays(-1);
+        await LoadEventsAsync();
+    }
+
+    private async Task LoadNextDayAsync()
+    {
+        if (selectedDate < DateTime.Today)
+        {
+            selectedDate = selectedDate.AddDays(1);
+            await LoadEventsAsync();
+        }
+    }
+
+    private void SwitchView(ViewMode mode)
+    {
+        currentView = mode;
+    }
+
+    private async Task CopyEventsAsync()
+    {
+        if (events == null || !events.Any())
+            return;
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"=== Events for {selectedDate:yyyy-MM-dd} ===");
+        sb.AppendLine($"Total: {events.Count} events");
+        sb.AppendLine();
+
+        foreach (var evt in events)
+        {
+            sb.AppendLine($"{evt.Timestamp:HH:mm:ss} - {evt.EventType}");
+            sb.AppendLine($"  Source: {evt.Source}");
+            if (!string.IsNullOrEmpty(evt.Description))
+                sb.AppendLine($"  Description: {evt.Description}");
+            if (evt.Metadata != null && evt.Metadata.Any())
+            {
+                sb.AppendLine("  Metadata:");
+                foreach (var meta in evt.Metadata)
+                    sb.AppendLine($"    {meta.Key}: {meta.Value}");
+            }
+            sb.AppendLine();
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", sb.ToString());
+            Console.WriteLine("Events copied to clipboard!");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to copy events: {ex.Message}");
+            errorMessage = "Failed to copy to clipboard";
+        }
+    }
+
+    private async Task CopyTimeSlotsAsync()
+    {
+        if (timeSlots == null || !timeSlots.Any())
+            return;
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"=== Time Slots for {selectedDate:yyyy-MM-dd} ===");
+
+        var totalMinutes = timeSlots.Sum(s => s.Duration.TotalMinutes);
+        var totalHours = (int)(totalMinutes / 60);
+        var totalMins = (int)(totalMinutes % 60);
+        sb.AppendLine($"Total: {timeSlots.Count} slots, {totalHours}h {totalMins}m");
+        sb.AppendLine();
+
+        foreach (var slot in timeSlots)
+        {
+            var duration = slot.Duration;
+            var hours = (int)duration.TotalHours;
+            var minutes = duration.Minutes;
+            var durationStr = hours > 0 ? $"{hours}h {minutes}m" : $"{minutes}m";
+
+            sb.Append($"{slot.StartTime:HH:mm} - {slot.EndTime:HH:mm} ({durationStr})");
+            if (!string.IsNullOrEmpty(slot.TicketNr))
+                sb.Append($" [{slot.TicketNr}]");
+            if (!string.IsNullOrEmpty(slot.Source))
+                sb.Append($" [{slot.Source}]");
+            sb.AppendLine();
+
+            sb.AppendLine($"  {slot.Text}");
+
+                sb.AppendLine($"  📍 {slot.Location}");
+
+            if (slot.Metadata != null && slot.Metadata.Any())
+            {
+                foreach (var meta in slot.Metadata)
+                    sb.AppendLine($"  {meta.Key}: {meta.Value}");
+            }
+
+            sb.AppendLine();
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", sb.ToString());
+            Console.WriteLine("Time slots copied to clipboard!");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to copy time slots: {ex.Message}");
+            errorMessage = "Failed to copy to clipboard";
+        }
+    }
+
+    private async Task ExportToAdtAsync()
+    {
+        if (timeSlots == null || !timeSlots.Any())
+            return;
+
+        try
+        {
+            var filePath = await AdtExportService.ExportToXmlAsync(timeSlots, selectedDate);
+            errorMessage = $"✅ Exported to: {filePath}";
+            Console.WriteLine($"Successfully exported to ADT: {filePath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to export to ADT: {ex.Message}");
+            errorMessage = $"Failed to export: {ex.Message}";
+        }
+    }
+
+    public void Dispose()
+    {
+        _loadCancellationTokenSource?.Cancel();
+        _loadCancellationTokenSource?.Dispose();
+    }
+}
+
+<style>
+    .home-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    h1 {
+        color: #0078d4;
+        margin-bottom: 5px;
+        font-size: 1.5rem;
+        margin-top: 0;
+    }
+
+    .controls {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        margin: 15px 0;
+        padding: 15px;
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+
+    .date-section {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .date-input {
+        padding: 8px 12px;
+        border: 2px solid #ced4da;
+        border-radius: 6px;
+        font-size: 14px;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        transition: all 0.2s ease;
+        background-color: white;
+        cursor: pointer;
+        min-width: 150px;
+    }
+
+        .date-input:hover {
+            border-color: #0078d4;
+        }
+
+        .date-input:focus {
+            outline: none;
+            border-color: #0078d4;
+            box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.15);
+        }
+
+        .date-input::-webkit-calendar-picker-indicator {
+            cursor: pointer;
+            padding: 2px;
+        }
+
+    .nav-arrow {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        border: 2px solid #0078d4;
+        background-color: white;
+        color: #0078d4;
+        font-size: 16px;
+        font-weight: bold;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+        .nav-arrow:hover:not(:disabled) {
+            background-color: #0078d4;
+            color: white;
+            transform: scale(1.05);
+        }
+
+        .nav-arrow:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+    .quick-date-btn {
+        padding: 8px 16px;
+        border: 2px solid #0078d4;
+        background-color: white;
+        color: #0078d4;
+        font-weight: 600;
+        font-size: 13px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+
+        .quick-date-btn:hover {
+            background-color: #0078d4;
+            color: white;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0, 120, 212, 0.2);
+        }
+
+        .quick-date-btn:active {
+            transform: translateY(0);
+        }
+
+    .action-buttons {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .btn {
+        padding: 8px 16px;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+        transition: all 0.2s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+        .btn:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+    .btn-refresh {
+        background-color: #0078d4;
+        color: white;
+    }
+
+        .btn-refresh:hover:not(:disabled) {
+            background-color: #106ebe;
+        }
+
+    .btn-copy {
+        background-color: #28a745;
+        color: white;
+    }
+
+        .btn-copy:hover:not(:disabled) {
+            background-color: #218838;
+        }
+
+    .btn-export {
+        background-color: #007bff;
+        color: white;
+    }
+
+        .btn-export:hover:not(:disabled) {
+            background-color: #0056b3;
+        }
+
+    .sources-info {
+        padding: 8px 10px;
+        background-color: #d1ecf1;
+        border-left: 3px solid #0c5460;
+        color: #0c5460;
+        border-radius: 3px;
+        margin-bottom: 10px;
+        font-size: 12px;
+    }
+
+    .error-message {
+        padding: 8px 10px;
+        background-color: #f8d7da;
+        border-left: 3px solid #721c24;
+        color: #721c24;
+        border-radius: 3px;
+        margin-bottom: 10px;
+        font-size: 12px;
+    }
+
+    .view-switcher {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 15px;
+        padding: 3px;
+        background-color: #e9ecef;
+        border-radius: 4px;
+        width: fit-content;
+    }
+
+    .view-btn {
+        padding: 6px 12px;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        background-color: transparent;
+        color: #495057;
+        font-size: 13px;
+        transition: all 0.2s;
+    }
+
+        .view-btn:hover {
+            background-color: #dee2e6;
+        }
+
+        .view-btn.active {
+            background-color: #0078d4;
+            color: white;
+            font-weight: 600;
+        }
+</style>
+

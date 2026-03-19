@@ -1,0 +1,354 @@
+@using FillMyADT.Models
+
+@if (IsLoading)
+{
+    <div class="loading-container">
+        <div class="spinner"></div>
+        <p>Loading time slots...</p>
+    </div>
+}
+else if (TimeSlots == null || !TimeSlots.Any())
+{
+    <div class="no-events">
+        <p>No time slots found for the selected date.</p>
+    </div>
+}
+else
+{
+    <div class="timeslot-list">
+        <h3>Time Slots (@TimeSlots.Count slots, @FormatTotalDuration(TimeSlots) total)</h3>
+
+        <div class="timeslots">
+            @foreach (var slot in TimeSlots)
+            {
+                <div class="timeslot-item @slot.CssClass">
+                    <div class="timeslot-time">
+                        <div class="time-range">
+                            @slot.StartTime.ToString("HH:mm") - @slot.EndTime.ToString("HH:mm")
+                        </div>
+                        <div class="duration">
+                            @slot.FormattedDuration
+                        </div>
+                    </div>
+                    <div class="timeslot-details">
+                        <div class="timeslot-header">
+                            @if (!string.IsNullOrEmpty(slot.Source))
+                            {
+                                <div class="source-badge source-@slot.Source.ToLowerInvariant().Replace(" ", "-")">@slot.Source</div>
+                            }
+                            @if (!string.IsNullOrEmpty(slot.TicketNr))
+                            {
+                                <div class="ticket-badge">@slot.TicketNr</div>
+                            }
+                            <div class="timeslot-text">@slot.Text</div>
+                        </div>
+
+                        <div class="timeslot-metadata">
+
+                            <span class="metadata-tag location-tag">📍 @slot.Location</span>
+
+                            @if (slot.Metadata != null)
+                            {
+                                @if (slot.Metadata.TryGetValue("Branch", out var branch))
+                                {
+                                    <span class="metadata-tag branch-tag">🌿 @branch</span>
+                                }
+                                @if (slot.Metadata.TryGetValue("Repository", out var repo))
+                                {
+                                    <span class="metadata-tag repo-tag">📦 @repo</span>
+                                }
+                                @if (slot.Metadata.TryGetValue("OriginalTime", out var originalTime))
+                                {
+                                    <span class="metadata-tag time-tag">🕐 Original: @DateTime.Parse(originalTime).ToString("HH:mm")</span>
+                                }
+                                @if (slot.Metadata.TryGetValue("DetectionMethod", out var method))
+                                {
+                                    <span class="metadata-tag method-tag">🔍 @method</span>
+                                }
+                                @if (slot.Metadata.TryGetValue("Duration", out var duration))
+                                {
+                                    <span class="metadata-tag duration-tag">⏱️ @duration</span>
+                                }
+                            }
+                        </div>
+
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter]
+    public IReadOnlyList<TimeSlot>? TimeSlots { get; set; }
+
+    [Parameter]
+    public bool IsLoading { get; set; }
+
+    private static string FormatTotalDuration(IReadOnlyList<TimeSlot> slots)
+    {
+        var totalMinutes = (int)slots.Sum(s => s.Duration.TotalMinutes);
+        var hours = totalMinutes / 60;
+        var minutes = totalMinutes % 60;
+
+        if (hours > 0)
+        {
+            return minutes > 0 ? $"{hours}h {minutes}m" : $"{hours}h";
+        }
+        return $"{minutes}m";
+    }
+}
+
+<style>
+    .timeslot-list {
+        margin-top: 10px;
+    }
+
+    .timeslot-list h3 {
+        margin: 0 0 10px 0;
+        font-size: 1.2rem;
+    }
+
+    .timeslots {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 8px;
+    }
+
+    .timeslot-item {
+        display: flex;
+        gap: 10px;
+        padding: 8px 10px;
+        background-color: white;
+        border-left: 3px solid #0078d4;
+        border-radius: 3px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+    }
+
+    /* Category-based styling */
+    .timeslot-item.category-startup {
+        border-left-color: #87ceeb; /* Light blue */
+        background-color: #f0f8ff; /* Alice blue background */
+    }
+
+    .timeslot-item.category-work {
+        border-left-color: #ffc107; /* Yellow */
+        background-color: #fffef0; /* Light yellow background */
+    }
+
+    .timeslot-item.category-meeting {
+        border-left-color: #0078d4; /* Blue */
+        background-color: #f0f7ff; /* Light blue background */
+    }
+
+    .timeslot-item.category-redmine {
+        border-left-color: #dc3545; /* Redmine red */
+        background-color: #fff5f5; /* Light red background */
+    }
+
+    .timeslot-item.category-tfs {
+        border-left-color: #6f42c1; /* TFS purple */
+        background-color: #f8f5ff; /* Light purple background */
+    }
+
+    .timeslot-item.category-break {
+        border-left-color: #6c757d; /* Gray */
+        background-color: #f8f9fa; /* Light gray background */
+    }
+
+    .timeslot-item.category-homeoffice {
+        border-left-color: #28a745; /* Green */
+        background-color: #f0fff4; /* Light green background */
+    }
+
+    .timeslot-item.category-holiday {
+        border-left-color: #fd7e14; /* Orange */
+        background-color: #fff8f0; /* Light orange background */
+    }
+
+    .timeslot-item.category-default {
+        border-left-color: #6c757d;
+        background-color: #f8f9fa;
+    }
+
+    .timeslot-time {
+        min-width: 100px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .time-range {
+        font-weight: bold;
+        color: #495057;
+        font-family: 'Consolas', monospace;
+        font-size: 12px;
+    }
+
+    .duration {
+        color: #6c757d;
+        font-size: 11px;
+        font-weight: 500;
+    }
+
+    .timeslot-details {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    .timeslot-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    /* Source badge - appears first for consistent positioning */
+    .source-badge {
+        font-weight: 600;
+        font-size: 10px;
+        padding: 3px 7px;
+        border-radius: 3px;
+        display: inline-block;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        min-width: 50px;
+        text-align: center;
+    }
+
+    .source-badge.source-git {
+        background-color: #ffc107;
+        color: #000;
+    }
+
+    .source-badge.source-outlook {
+        background-color: #0078d4;
+        color: #fff;
+    }
+
+    .source-badge.source-edge-browser {
+        background-color: #28a745;
+        color: #fff;
+    }
+
+    .source-badge.source-windows {
+        background-color: #17a2b8;
+        color: #fff;
+    }
+
+    .source-badge.source-system {
+        background-color: #6c757d;
+        color: #fff;
+    }
+
+    .source-badge.source-unknown {
+        background-color: #999;
+        color: #fff;
+    }
+
+    .ticket-badge {
+        background-color: #ff9800; /* Orange for better contrast with yellow background */
+        color: #fff;
+        font-weight: 600;
+        font-size: 11px;
+        padding: 3px 8px;
+        border-radius: 3px;
+        display: inline-block;
+    }
+
+    .timeslot-text {
+        color: #212529;
+        font-size: 12px;
+        line-height: 1.3;
+        flex: 1;
+    }
+
+    .timeslot-metadata {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 2px;
+    }
+
+    .metadata-tag {
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 2px;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        white-space: nowrap;
+    }
+
+    .location-tag {
+        background-color: #e9ecef;
+        color: #495057;
+    }
+
+    .branch-tag {
+        background-color: #17a2b8;
+        color: white;
+        font-weight: 500;
+    }
+
+    .repo-tag {
+        background-color: #6c757d;
+        color: white;
+        font-weight: 500;
+    }
+
+    .time-tag {
+        background-color: #ffc107;
+        color: #000;
+        font-weight: 500;
+    }
+
+    .method-tag {
+        background-color: #17a2b8;
+        color: white;
+        font-weight: 500;
+    }
+
+    .duration-tag {
+        background-color: #28a745;
+        color: white;
+        font-weight: 500;
+    }
+
+    .no-events {
+        padding: 20px;
+        text-align: center;
+        color: #6c757d;
+        font-size: 13px;
+    }
+
+    .loading-container {
+        padding: 40px 20px;
+        text-align: center;
+        color: #6c757d;
+    }
+
+        .loading-container p {
+            margin-top: 15px;
+            font-size: 13px;
+        }
+
+    .spinner {
+        border: 3px solid #f3f3f3;
+        border-top: 3px solid #0078d4;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+        margin: 0 auto;
+    }
+
+    @@keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+</style>
