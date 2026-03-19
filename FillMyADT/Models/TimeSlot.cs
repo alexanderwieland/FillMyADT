@@ -41,6 +41,11 @@ public record TimeSlot
     public Dictionary<string, string>? Metadata { get; init; }
 
     /// <summary>
+    /// Source of the time slot (e.g., "Git", "Outlook", "Edge Browser", "Windows")
+    /// </summary>
+    public string? Source { get; init; }
+
+    /// <summary>
     /// Category of the time slot
     /// </summary>
     public TimeSlotCategory Category { get; init; } = TimeSlotCategory.Other;

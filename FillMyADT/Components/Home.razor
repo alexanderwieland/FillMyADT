@@ -12,30 +12,27 @@
     <p>Track your daily activities from Windows events and Git history</p>
 
     <div class="controls">
-        <div class="date-selector">
-            <label>Select Date:</label>
-            <div class="date-picker-wrapper">
-                <input type="date"
-                       @bind="selectedDate"
-                       @bind:after="LoadEventsAsync"
-                       max="@DateTime.Today.ToString("yyyy-MM-dd")"
-                       class="enhanced-date-input" />
-                <div class="quick-date-buttons">
-                    <button class="quick-btn" @onclick="LoadYesterdayAsync" title="Yesterday">Y</button>
-                    <button class="quick-btn" @onclick="LoadTodayAsync" title="Today">T</button>
-                </div>
-            </div>
-        </div>
-
-        <div class="quick-actions">
-            <button class="btn btn-arrow" @onclick="LoadPreviousDayAsync" title="Previous Day">
+        <!-- Date Navigation Section -->
+        <div class="date-section">
+            <button class="nav-arrow" @onclick="LoadPreviousDayAsync" title="Previous Day">
                 ◀
             </button>
-            <button class="btn btn-arrow" @onclick="LoadNextDayAsync" title="Next Day" disabled="@(selectedDate >= DateTime.Today)">
+            <input type="date"
+                   @bind="selectedDate"
+                   @bind:after="LoadEventsAsync"
+                   max="@DateTime.Today.ToString("yyyy-MM-dd")"
+                   class="date-input" />
+            <button class="nav-arrow" @onclick="LoadNextDayAsync" title="Next Day" disabled="@(selectedDate >= DateTime.Today)">
                 ▶
             </button>
-            <button class="btn" @onclick="LoadEventsAsync" disabled="@isLoading">
-                @(isLoading ? "Loading..." : "Refresh")
+            <button class="quick-date-btn" @onclick="LoadYesterdayAsync" title="Yesterday">Yesterday</button>
+            <button class="quick-date-btn" @onclick="LoadTodayAsync" title="Today">Today</button>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="action-buttons">
+            <button class="btn btn-refresh" @onclick="LoadEventsAsync" disabled="@isLoading">
+                @(isLoading ? "Loading..." : "🔄 Refresh")
             </button>
             <button class="btn btn-copy" @onclick="CopyEventsAsync" disabled="@(events == null || !events.Any())" title="Copy Events to Clipboard">
                 📋 Copy Events
@@ -298,36 +295,23 @@
 
     .controls {
         display: flex;
-        gap: 12px;
-        align-items: center;
-        margin: 15px 0;
-        padding: 10px;
-        background-color: #f8f9fa;
-        border-radius: 4px;
-    }
-
-    .date-selector {
-        display: flex;
         flex-direction: column;
-        gap: 6px;
-        min-width: 220px;
+        gap: 10px;
+        margin: 15px 0;
+        padding: 15px;
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     }
 
-        .date-selector label {
-            font-weight: 600;
-            color: #495057;
-            font-size: 13px;
-            margin-bottom: 2px;
-        }
-
-    .date-picker-wrapper {
+    .date-section {
         display: flex;
-        gap: 6px;
         align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
     }
 
-    .enhanced-date-input {
-        flex: 1;
+    .date-input {
         padding: 8px 12px;
         border: 2px solid #ced4da;
         border-radius: 6px;
@@ -336,43 +320,33 @@
         transition: all 0.2s ease;
         background-color: white;
         cursor: pointer;
+        min-width: 150px;
     }
 
-        .enhanced-date-input:hover {
+        .date-input:hover {
             border-color: #0078d4;
         }
 
-        .enhanced-date-input:focus {
+        .date-input:focus {
             outline: none;
             border-color: #0078d4;
-            box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.1);
+            box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.15);
         }
 
-        .enhanced-date-input::-webkit-calendar-picker-indicator {
+        .date-input::-webkit-calendar-picker-indicator {
             cursor: pointer;
-            font-size: 16px;
-            padding: 4px;
-            border-radius: 4px;
+            padding: 2px;
         }
 
-            .enhanced-date-input::-webkit-calendar-picker-indicator:hover {
-                background-color: #f0f0f0;
-            }
-
-    .quick-date-buttons {
-        display: flex;
-        gap: 4px;
-    }
-
-    .quick-btn {
-        width: 32px;
-        height: 32px;
+    .nav-arrow {
+        width: 36px;
+        height: 36px;
         padding: 0;
         border: 2px solid #0078d4;
         background-color: white;
         color: #0078d4;
-        font-weight: 600;
-        font-size: 12px;
+        font-size: 16px;
+        font-weight: bold;
         border-radius: 6px;
         cursor: pointer;
         transition: all 0.2s ease;
@@ -381,60 +355,85 @@
         justify-content: center;
     }
 
-        .quick-btn:hover {
+        .nav-arrow:hover:not(:disabled) {
             background-color: #0078d4;
             color: white;
-            transform: translateY(-1px);
+            transform: scale(1.05);
         }
 
-        .quick-btn:active {
-            transform: translateY(0);
-        }
-
-    .quick-actions {
-        display: flex;
-        gap: 6px;
-        margin-left: auto;
-    }
-
-    .btn {
-        padding: 6px 12px;
-        border: none;
-        border-radius: 3px;
-        cursor: pointer;
-        background-color: #0078d4;
-        color: white;
-        font-size: 13px;
-        transition: background-color 0.2s;
-    }
-
-        .btn:hover:not(:disabled) {
-            background-color: #106ebe;
-        }
-
-        .btn:disabled {
-            background-color: #6c757d;
+        .nav-arrow:disabled {
+            opacity: 0.4;
             cursor: not-allowed;
         }
 
-    .btn-arrow {
-        min-width: 36px;
-        padding: 6px;
-        font-size: 14px;
+    .quick-date-btn {
+        padding: 8px 16px;
+        border: 2px solid #0078d4;
+        background-color: white;
+        color: #0078d4;
+        font-weight: 600;
+        font-size: 13px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s ease;
     }
+
+        .quick-date-btn:hover {
+            background-color: #0078d4;
+            color: white;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0, 120, 212, 0.2);
+        }
+
+        .quick-date-btn:active {
+            transform: translateY(0);
+        }
+
+    .action-buttons {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .btn {
+        padding: 8px 16px;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+        transition: all 0.2s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+    }
+
+        .btn:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+    .btn-refresh {
+        background-color: #0078d4;
+        color: white;
+    }
+
+        .btn-refresh:hover:not(:disabled) {
+            background-color: #106ebe;
+        }
 
     .btn-copy {
         background-color: #28a745;
-        font-size: 12px;
-        padding: 6px 10px;
+        color: white;
     }
 
         .btn-copy:hover:not(:disabled) {
             background-color: #218838;
-        }
-
-        .btn-copy:disabled {
-            background-color: #6c757d;
         }
 
     .sources-info {

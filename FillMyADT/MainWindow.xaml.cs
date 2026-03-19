@@ -73,6 +73,7 @@ namespace FillMyADT
             WindowsEventSourceConfig windowsConfig;
             GitEventSourceConfig gitConfig;
             OutlookEventSourceConfig outlookConfig;
+            EdgeEventSourceConfig edgeConfig;
 
             try
             {
@@ -107,12 +108,24 @@ namespace FillMyADT
                 outlookConfig = new OutlookEventSourceConfig();
             }
 
+            try
+            {
+                edgeConfig = configService.LoadConfigAsync<EdgeEventSourceConfig>().GetAwaiter().GetResult()
+                    ?? new EdgeEventSourceConfig();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to load Edge event source config, using defaults");
+                edgeConfig = new EdgeEventSourceConfig();
+            }
+
             Log.Information("Configuration loaded from {ConfigPath}", configService.ConfigDirectory);
 
             // Register event sources with configurations
             serviceCollection.AddSingleton<IEventSource>(sp => new WindowsEventSource(windowsConfig));
             serviceCollection.AddSingleton<IEventSource>(sp => new GitEventSource(gitConfig));
             serviceCollection.AddSingleton<IEventSource>(sp => new OutlookEventSource(outlookConfig));
+            serviceCollection.AddSingleton<IEventSource>(sp => new EdgeEventSource(edgeConfig));
 
             // Register aggregator service
             serviceCollection.AddSingleton<EventAggregatorService>();

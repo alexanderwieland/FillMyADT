@@ -22,7 +22,6 @@ public class GitEventSource : IEventSource
     private const int MaxReflogEntries = 20;     // Limit reflog entries (reduced from 50)
     private const int GitCommandTimeoutSeconds = 5;  // Timeout for git commands (reduced from 10)
 
-
     public string Name => "Git History";
 
     public GitEventSource(GitEventSourceConfig config)

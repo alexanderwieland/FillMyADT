@@ -15,15 +15,67 @@
 /* Controls Section */
 .controls {
     display: flex;
+    flex-direction: column;
     gap: 12px;
-    align-items: center;
     margin: 15px 0;
-    padding: 10px;
+    padding: 15px;
     background-color: #f8f9fa;
     border-radius: 4px;
 }
 
-/* Date Selector */
+/* Centered Date Navigation */
+.date-navigation {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+}
+
+.nav-arrow {
+    width: 40px;
+    height: 40px;
+    border: 2px solid #0078d4;
+    background-color: white;
+    color: #0078d4;
+    font-size: 18px;
+    font-weight: bold;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nav-arrow:hover:not(:disabled) {
+    background-color: #0078d4;
+    color: white;
+    transform: scale(1.05);
+}
+
+.nav-arrow:active:not(:disabled) {
+    transform: scale(0.95);
+}
+
+.nav-arrow:disabled {
+    border-color: #ccc;
+    color: #ccc;
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.date-picker-center {
+    min-width: 200px;
+}
+
+.date-picker-center .enhanced-date-input {
+    width: 100%;
+    text-align: center;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+/* Date Selector (legacy - keeping for compatibility) */
 .date-selector {
     display: flex;
     flex-direction: column;
@@ -82,58 +134,40 @@
     gap: 4px;
 }
 
-.quick-btn {
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border: 2px solid #0078d4;
-    background-color: white;
-    color: #0078d4;
-    font-weight: 600;
-    font-size: 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.quick-btn:hover {
-    background-color: #0078d4;
-    color: white;
-    transform: translateY(-1px);
-}
-
-.quick-btn:active {
-    transform: translateY(0);
-}
-
 /* Quick Actions */
 .quick-actions {
     display: flex;
-    gap: 6px;
-    margin-left: auto;
+    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
 }
 
 .btn {
-    padding: 6px 12px;
+    padding: 8px 16px;
     border: none;
-    border-radius: 3px;
+    border-radius: 6px;
     cursor: pointer;
     background-color: #0078d4;
     color: white;
     font-size: 13px;
-    transition: background-color 0.2s;
+    font-weight: 500;
+    transition: all 0.2s;
 }
 
 .btn:hover:not(:disabled) {
     background-color: #106ebe;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.btn:active:not(:disabled) {
+    transform: translateY(0);
 }
 
 .btn:disabled {
     background-color: #6c757d;
     cursor: not-allowed;
+    opacity: 0.6;
 }
 
 .btn-arrow {
@@ -142,10 +176,33 @@
     font-size: 14px;
 }
 
+.quick-btn {
+    padding: 8px 16px;
+    border: 2px solid #0078d4;
+    background-color: white;
+    color: #0078d4;
+    font-weight: 600;
+    font-size: 13px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.quick-btn:hover {
+    background-color: #0078d4;
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.quick-btn:active {
+    transform: translateY(0);
+}
+
 .btn-copy {
     background-color: #28a745;
     font-size: 12px;
-    padding: 6px 10px;
+    padding: 8px 14px;
 }
 
 .btn-copy:hover:not(:disabled) {

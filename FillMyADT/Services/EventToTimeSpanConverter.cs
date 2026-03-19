@@ -148,6 +148,17 @@ public class EventToTimeSpanConverter
 
         var sortedEvents = events.OrderBy(e => e.Timestamp).ToList();
 
+        // Check for special whole-day events (Homeoffice or Holiday)
+        var specialEvent = sortedEvents.FirstOrDefault(e => 
+            e.EventType == "SpecialWholeDay-Homeoffice" || 
+            e.EventType == "SpecialWholeDay-Holiday");
+
+        if (specialEvent != null)
+        {
+            // Return a single special timeslot for the whole day
+            return CreateSpecialWholeDayTimeSlot(specialEvent);
+        }
+
         // Find Boot and Shutdown events to determine work boundaries
         var bootEvent = sortedEvents.FirstOrDefault(e => e.EventType == "Boot");
         var shutdownEvent = sortedEvents.LastOrDefault(e => e.EventType == "Shutdown");
@@ -182,7 +193,8 @@ public class EventToTimeSpanConverter
         // Get all work-related events (commits) between work start and end
         var workEvents = sortedEvents
             .Where(e => e.EventType != "Boot" && e.EventType != "Shutdown" 
-                     && e.EventType != "CalendarMeetingStart" && e.EventType != "CalendarMeetingEnd")
+                     && e.EventType != "CalendarMeetingStart" && e.EventType != "CalendarMeetingEnd"
+                     && e.EventType != "ReviewStart" && e.EventType != "ReviewEnd")
             .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= workStart && 
                        TimeOnly.FromDateTime(e.Timestamp) <= workEnd)
             .ToList();
@@ -197,6 +209,7 @@ public class EventToTimeSpanConverter
             EndTime = firstSlotEnd,
             TicketNr = null,
             Text = "Startup",
+            Source = GetSourceFromCategory(TimeSlotCategory.Startup),
             Category = TimeSlotCategory.Startup
         });
 
@@ -216,7 +229,7 @@ public class EventToTimeSpanConverter
         return timeSlots;
     }
 
-    private record CalendarMeeting(TimeOnly Start, TimeOnly End, string Subject, string? Location);
+    private record CalendarMeeting(TimeOnly Start, TimeOnly End, string Subject, string? Location, string? TicketNumber = null);
 
     /// <summary>
     /// Extract and consolidate overlapping calendar meetings including lunch break
@@ -224,7 +237,7 @@ public class EventToTimeSpanConverter
     private List<CalendarMeeting> ExtractCalendarMeetings(List<Event> events, TimeOnly workStart, TimeOnly workEnd)
     {
         var meetingStarts = events
-            .Where(e => e.EventType == "CalendarMeetingStart")
+            .Where(e => e.EventType == "CalendarMeetingStart" || e.EventType == "ReviewStart")
             .Where(e => TimeOnly.FromDateTime(e.Timestamp) < workEnd)
             .ToList();
 
@@ -249,8 +262,11 @@ public class EventToTimeSpanConverter
 
         foreach (var startEvent in meetingStarts)
         {
+            // Match corresponding end event (CalendarMeetingEnd or ReviewEnd)
+            var expectedEndType = startEvent.EventType == "ReviewStart" ? "ReviewEnd" : "CalendarMeetingEnd";
+
             var endEvent = events.FirstOrDefault(e => 
-                e.EventType == "CalendarMeetingEnd" && 
+                e.EventType == expectedEndType && 
                 e.Description == startEvent.Description &&
                 e.Timestamp >= startEvent.Timestamp);
 
@@ -270,7 +286,8 @@ public class EventToTimeSpanConverter
                 end = workEnd;
 
             var location = startEvent.Metadata?.GetValueOrDefault("Location");
-            meetings.Add(new CalendarMeeting(start, end, startEvent.Description ?? "Meeting", location));
+            var ticketNumber = startEvent.Metadata?.GetValueOrDefault("TicketNumber");
+            meetings.Add(new CalendarMeeting(start, end, startEvent.Description ?? "Meeting", location, ticketNumber));
         }
 
         // Handle overlaps by adjusting times
@@ -311,7 +328,7 @@ public class EventToTimeSpanConverter
             // Only add if duration is still positive
             if (end > start)
             {
-                resolved.Add(new CalendarMeeting(start, end, current.Subject, current.Location));
+                resolved.Add(new CalendarMeeting(start, end, current.Subject, current.Location, current.TicketNumber));
             }
         }
 
@@ -335,6 +352,7 @@ public class EventToTimeSpanConverter
                 EndTime = workEnd,
                 TicketNr = GetTicketNumberFromEvents(workEvents, slotTime, date, branchHistory),
                 Text = GetWorkDescription(workEvents),
+                Source = GetSourceFromCategory(TimeSlotCategory.Work),
                 Category = TimeSlotCategory.Work
             });
             return;
@@ -378,6 +396,7 @@ public class EventToTimeSpanConverter
                 EndTime = breakStart,
                 TicketNr = GetTicketNumberFromEvents(morningEvents.Any() ? morningEvents : workEvents, morningSlotTime, date, branchHistory),
                 Text = GetWorkDescription(morningEvents.Any() ? morningEvents : workEvents),
+                Source = GetSourceFromCategory(TimeSlotCategory.Work),
                 Category = TimeSlotCategory.Work
             });
         }
@@ -393,6 +412,7 @@ public class EventToTimeSpanConverter
                 EndTime = workEnd,
                 TicketNr = GetTicketNumberFromEvents(afternoonEvents.Any() ? afternoonEvents : (morningEvents.Any() ? morningEvents : workEvents), afternoonSlotTime, date, branchHistory),
                 Text = afternoonEvents.Any() ? GetWorkDescription(afternoonEvents) : GetWorkDescription(morningEvents.Any() ? morningEvents : workEvents),
+                Source = GetSourceFromCategory(TimeSlotCategory.Work),
                 Category = TimeSlotCategory.Work
             });
         }
@@ -498,20 +518,22 @@ public class EventToTimeSpanConverter
                     TicketNr = GetTicketNumberFromEvents(eventsInPeriod.Any() ? eventsInPeriod : workEvents, slotTime, date, branchHistory),
                     Text = GetWorkDescription(eventsInPeriod.Any() ? eventsInPeriod : workEvents),
                     Location = null,
+                    Source = GetSourceFromCategory(TimeSlotCategory.Work),
                     Category = TimeSlotCategory.Work
                 });
             }
 
-            // Add meeting slot
-            var category = meeting.Subject == "Lunch Break" ? TimeSlotCategory.Break : TimeSlotCategory.Meeting;
+            // Add meeting slot with appropriate category
+            var category = DetermineMeetingCategory(meeting);
             timeSlots.Add(new TimeSlot
             {
                 Date = date,
                 StartTime = meeting.Start,
                 EndTime = meeting.End,
-                TicketNr = null,
+                TicketNr = meeting.TicketNumber,
                 Text = meeting.Subject,
                 Location = meeting.Location,
+                Source = GetSourceFromCategory(category),
                 Category = category
             });
 
@@ -538,6 +560,7 @@ public class EventToTimeSpanConverter
                     TicketNr = GetTicketNumberFromEvents(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents, slotTime, date, branchHistory),
                     Text = GetWorkDescription(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents),
                     Location = null,
+                    Source = GetSourceFromCategory(TimeSlotCategory.Work),
                     Category = TimeSlotCategory.Work
                 });
             }
@@ -562,6 +585,7 @@ public class EventToTimeSpanConverter
                 TicketNr = GetTicketNumberFromEvents(eventsInPeriod.Any() ? eventsInPeriod : workEvents, slotTime, date, branchHistory),
                 Text = GetWorkDescription(eventsInPeriod.Any() ? eventsInPeriod : workEvents),
                 Location = null,
+                Source = GetSourceFromCategory(TimeSlotCategory.Work),
                 Category = TimeSlotCategory.Work
             });
         }
@@ -713,6 +737,72 @@ public class EventToTimeSpanConverter
             return ticket;
         }
         return fallbackTicketNumber;
+    }
+
+    /// <summary>
+    /// Determine the category of a meeting based on its location metadata
+    /// </summary>
+    private static TimeSlotCategory DetermineMeetingCategory(CalendarMeeting meeting)
+    {
+        // Check for lunch break
+        if (meeting.Subject == "Lunch Break")
+            return TimeSlotCategory.Break;
+
+        // Check location metadata to distinguish Edge events from Outlook
+        if (meeting.Location == "Redmine")
+            return TimeSlotCategory.RedmineTickets;
+
+        if (meeting.Location == "TFS")
+            return TimeSlotCategory.TfsWork;
+
+        // Default to Outlook meeting
+        return TimeSlotCategory.Meeting;
+    }
+
+    /// <summary>
+    /// Get source name from category
+    /// </summary>
+    private static string GetSourceFromCategory(TimeSlotCategory category) => category switch
+    {
+        TimeSlotCategory.Startup => "Windows",
+        TimeSlotCategory.Work => "Git",
+        TimeSlotCategory.Meeting => "Outlook",
+        TimeSlotCategory.Break => "System",
+        TimeSlotCategory.RedmineTickets => "Edge Browser",
+        TimeSlotCategory.TfsWork => "Edge Browser",
+        TimeSlotCategory.Homeoffice => "Outlook",
+        TimeSlotCategory.Holiday => "Outlook",
+        TimeSlotCategory.Other => "Unknown",
+        _ => "Unknown"
+    };
+
+    /// <summary>
+    /// Create a single special whole-day timeslot for Homeoffice or Holiday
+    /// </summary>
+    private IReadOnlyList<TimeSlot> CreateSpecialWholeDayTimeSlot(Event specialEvent)
+    {
+        var date = DateOnly.FromDateTime(specialEvent.Timestamp);
+        var category = specialEvent.EventType == "SpecialWholeDay-Homeoffice" 
+            ? TimeSlotCategory.Homeoffice 
+            : TimeSlotCategory.Holiday;
+
+        var description = specialEvent.Description ?? (category == TimeSlotCategory.Homeoffice 
+            ? "Home Office" 
+            : "Holiday");
+
+        var timeSlot = new TimeSlot
+        {
+            Date = date,
+            StartTime = new TimeOnly(8, 0),  // Start at 8:00 AM
+            EndTime = new TimeOnly(17, 0),   // End at 5:00 PM (9 hours)
+            TicketNr = null,
+            Text = description,
+            Source = GetSourceFromCategory(category),
+            Category = category
+        };
+
+        Log.Information("Created special whole-day {Category} timeslot for {Date}", category, date);
+        return [timeSlot];
     }
 
     /// <summary>

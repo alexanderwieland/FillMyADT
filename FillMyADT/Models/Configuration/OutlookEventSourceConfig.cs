@@ -29,4 +29,19 @@ public record OutlookEventSourceConfig : EventSourceConfig
     /// Only connect to running Outlook instance (don't start new instance)
     /// </summary>
     public bool RequireRunningInstance { get; init; } = false;
+
+    /// <summary>
+    /// Subject name for home office whole-day events
+    /// </summary>
+    public string HomeOfficeEventName { get; init; } = "apw - HO";
+
+    /// <summary>
+    /// Subject name for holiday/vacation whole-day events
+    /// </summary>
+    public string HolidayEventName { get; init; } = "apw - Urlaub";
+
+    /// <summary>
+    /// Enable special handling for whole-day home office and holiday events
+    /// </summary>
+    public bool EnableSpecialWholeDayEvents { get; init; } = true;
 }

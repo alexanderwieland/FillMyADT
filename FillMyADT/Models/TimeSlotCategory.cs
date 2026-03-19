@@ -16,7 +16,7 @@ public enum TimeSlotCategory
     Work,
 
     /// <summary>
-    /// Meeting or calendar event
+    /// Meeting or calendar event (Outlook)
     /// </summary>
     Meeting,
 
@@ -24,6 +24,26 @@ public enum TimeSlotCategory
     /// Break period (lunch, coffee, etc.)
     /// </summary>
     Break,
+
+    /// <summary>
+    /// Redmine ticket management
+    /// </summary>
+    RedmineTickets,
+
+    /// <summary>
+    /// TFS work item or pull request
+    /// </summary>
+    TfsWork,
+
+    /// <summary>
+    /// Home office day
+    /// </summary>
+    Homeoffice,
+
+    /// <summary>
+    /// Holiday or vacation day
+    /// </summary>
+    Holiday,
 
     /// <summary>
     /// Uncategorized or unknown
@@ -45,6 +65,10 @@ public static class TimeSlotCategoryExtensions
         TimeSlotCategory.Work => "Work",
         TimeSlotCategory.Meeting => "Meeting",
         TimeSlotCategory.Break => "Break",
+        TimeSlotCategory.RedmineTickets => "Redmine Tickets",
+        TimeSlotCategory.TfsWork => "TFS Work",
+        TimeSlotCategory.Homeoffice => "Home Office",
+        TimeSlotCategory.Holiday => "Holiday",
         TimeSlotCategory.Other => "Other",
         _ => category.ToString()
     };
@@ -58,6 +82,10 @@ public static class TimeSlotCategoryExtensions
         TimeSlotCategory.Work => "category-work",
         TimeSlotCategory.Meeting => "category-meeting",
         TimeSlotCategory.Break => "category-break",
+        TimeSlotCategory.RedmineTickets => "category-redmine",
+        TimeSlotCategory.TfsWork => "category-tfs",
+        TimeSlotCategory.Homeoffice => "category-homeoffice",
+        TimeSlotCategory.Holiday => "category-holiday",
         TimeSlotCategory.Other => "category-default",
         _ => "category-default"
     };
@@ -71,6 +99,10 @@ public static class TimeSlotCategoryExtensions
         "work" => TimeSlotCategory.Work,
         "meeting" => TimeSlotCategory.Meeting,
         "break" => TimeSlotCategory.Break,
+        "redminetickets" => TimeSlotCategory.RedmineTickets,
+        "tfswork" => TimeSlotCategory.TfsWork,
+        "homeoffice" => TimeSlotCategory.Homeoffice,
+        "holiday" => TimeSlotCategory.Holiday,
         null => TimeSlotCategory.Other,
         _ => TimeSlotCategory.Other
     };

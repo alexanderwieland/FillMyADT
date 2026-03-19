@@ -9,6 +9,7 @@ namespace FillMyADT.Models.Configuration;
 [JsonDerivedType(typeof(WindowsEventSourceConfig), typeDiscriminator: "WindowsEventSource")]
 [JsonDerivedType(typeof(GitEventSourceConfig), typeDiscriminator: "GitEventSource")]
 [JsonDerivedType(typeof(OutlookEventSourceConfig), typeDiscriminator: "OutlookEventSource")]
+[JsonDerivedType(typeof(EdgeEventSourceConfig), typeDiscriminator: "EdgeEventSource")]
 public abstract record EventSourceConfig
 {
     /// <summary>

@@ -125,6 +125,28 @@ public class OutlookEventSource : IEventSource
                             string location = item.Location ?? string.Empty;
                             bool isAllDay = item.AllDayEvent;
 
+                            // Check for special whole-day events (HO and Urlaub)
+                            if (isAllDay && _config.EnableSpecialWholeDayEvents && IsSpecialWholeDayEvent(subject, out var specialEventType))
+                            {
+                                // Create a single special event instead of start/end pair
+                                events.Add(new Event
+                                {
+                                    Source = Name,
+                                    Timestamp = itemStart.Date, // Use date only for whole-day events
+                                    EventType = specialEventType,
+                                    Description = subject,
+                                    Metadata = new Dictionary<string, string>
+                                    {
+                                        ["Location"] = location,
+                                        ["IsAllDay"] = "True",
+                                        ["SpecialEvent"] = "True"
+                                    }
+                                });
+
+                                Log.Debug("Added special whole-day event: {Subject} ({EventType})", subject, specialEventType);
+                                continue; // Skip normal processing
+                            }
+
                             if (isAllDay && !_config.IncludeAllDayEvents)
                                 continue;
 
@@ -261,5 +283,32 @@ public class OutlookEventSource : IEventSource
 
             return false;
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Check if the event subject indicates a special whole-day event (Home Office or Holiday)
+    /// </summary>
+    private bool IsSpecialWholeDayEvent(string subject, out string eventType)
+    {
+        eventType = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(subject))
+            return false;
+
+        // Check for Home Office event
+        if (subject.Equals(_config.HomeOfficeEventName, StringComparison.OrdinalIgnoreCase))
+        {
+            eventType = "SpecialWholeDay-Homeoffice";
+            return true;
+        }
+
+        // Check for Holiday/Vacation event
+        if (subject.Equals(_config.HolidayEventName, StringComparison.OrdinalIgnoreCase))
+        {
+            eventType = "SpecialWholeDay-Holiday";
+            return true;
+        }
+
+        return false;
     }
 }

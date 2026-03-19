@@ -32,6 +32,10 @@ else
                     </div>
                     <div class="timeslot-details">
                         <div class="timeslot-header">
+                            @if (!string.IsNullOrEmpty(slot.Source))
+                            {
+                                <div class="source-badge source-@slot.Source.ToLowerInvariant().Replace(" ", "-")">@slot.Source</div>
+                            }
                             @if (!string.IsNullOrEmpty(slot.TicketNr))
                             {
                                 <div class="ticket-badge">#@slot.TicketNr</div>
@@ -137,20 +141,34 @@ else
         background-color: #fffef0; /* Light yellow background */
     }
 
-        .timeslot-item.category-work .ticket-badge {
-            background-color: #ffc107;
-            color: #000;
-            font-weight: 600;
-        }
-
     .timeslot-item.category-meeting {
         border-left-color: #0078d4; /* Blue */
         background-color: #f0f7ff; /* Light blue background */
     }
 
+    .timeslot-item.category-redmine {
+        border-left-color: #dc3545; /* Redmine red */
+        background-color: #fff5f5; /* Light red background */
+    }
+
+    .timeslot-item.category-tfs {
+        border-left-color: #6f42c1; /* TFS purple */
+        background-color: #f8f5ff; /* Light purple background */
+    }
+
     .timeslot-item.category-break {
         border-left-color: #6c757d; /* Gray */
         background-color: #f8f9fa; /* Light gray background */
+    }
+
+    .timeslot-item.category-homeoffice {
+        border-left-color: #28a745; /* Green */
+        background-color: #f0fff4; /* Light green background */
+    }
+
+    .timeslot-item.category-holiday {
+        border-left-color: #fd7e14; /* Orange */
+        background-color: #fff8f0; /* Light orange background */
     }
 
     .timeslot-item.category-default {
@@ -190,6 +208,49 @@ else
         align-items: center;
         gap: 8px;
         flex-wrap: wrap;
+    }
+
+    /* Source badge - appears first for consistent positioning */
+    .source-badge {
+        font-weight: 600;
+        font-size: 10px;
+        padding: 3px 7px;
+        border-radius: 3px;
+        display: inline-block;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        min-width: 50px;
+        text-align: center;
+    }
+
+    .source-badge.source-git {
+        background-color: #ffc107;
+        color: #000;
+    }
+
+    .source-badge.source-outlook {
+        background-color: #0078d4;
+        color: #fff;
+    }
+
+    .source-badge.source-edge-browser {
+        background-color: #28a745;
+        color: #fff;
+    }
+
+    .source-badge.source-windows {
+        background-color: #17a2b8;
+        color: #fff;
+    }
+
+    .source-badge.source-system {
+        background-color: #6c757d;
+        color: #fff;
+    }
+
+    .source-badge.source-unknown {
+        background-color: #999;
+        color: #fff;
     }
 
     .ticket-badge {
