@@ -1,0 +1,310 @@
+@page "/"
+@using FillMyADT.Services
+@using FillMyADT.Models
+@inject EventAggregatorService EventAggregator
+@inject EventToTimeSpanConverter TimeSlotConverter
+@implements IDisposable
+
+<div class="home-container">
+    <h1>Daily Activity Tracker</h1>
+    <p>Track your daily activities from Windows events and Git history</p>
+
+    <div class="controls">
+        <div class="date-selector">
+            <label for="selectedDate">Select Date:</label>
+            <input type="date"
+                   id="selectedDate"
+                   @bind="selectedDate"
+                   @bind:after="LoadEventsAsync"
+                   max="@DateTime.Today.ToString("yyyy-MM-dd")" />
+        </div>
+
+        <div class="quick-actions">
+            <button class="btn btn-arrow" @onclick="LoadPreviousDayAsync" title="Previous Day">
+                ◀
+            </button>
+            <button class="btn" @onclick="LoadTodayAsync">Today</button>
+            <button class="btn" @onclick="LoadYesterdayAsync">Yesterday</button>
+            <button class="btn btn-arrow" @onclick="LoadNextDayAsync" title="Next Day" disabled="@(selectedDate >= DateTime.Today)">
+                ▶
+            </button>
+            <button class="btn" @onclick="LoadEventsAsync" disabled="@isLoading">
+                @(isLoading ? "Loading..." : "Refresh")
+            </button>
+        </div>
+    </div>
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="error-message">
+            @errorMessage
+        </div>
+    }
+
+    @if (availableSources != null && availableSources.Any())
+    {
+        <div class="sources-info">
+            <strong>Active Sources:</strong> @string.Join(", ", availableSources)
+        </div>
+    }
+
+    <div class="view-switcher">
+        <button class="view-btn @(currentView == ViewMode.Events ? "active" : "")" @onclick="() => SwitchView(ViewMode.Events)">
+            📋 Events
+        </button>
+        <button class="view-btn @(currentView == ViewMode.TimeSlots ? "active" : "")" @onclick="() => SwitchView(ViewMode.TimeSlots)">
+            ⏱️ Time Slots
+        </button>
+    </div>
+
+    @if (currentView == ViewMode.Events)
+    {
+        <EventList Events="@events" IsLoading="@isLoading" />
+    }
+    else
+    {
+        <TimeSlotList TimeSlots="@timeSlots" IsLoading="@isLoading" />
+    }
+</div>
+
+@code {
+    private enum ViewMode { Events, TimeSlots }
+
+    private DateTime selectedDate = DateTime.Today;
+    private IReadOnlyList<Event>? events;
+    private IReadOnlyList<TimeSlot>? timeSlots;
+    private IEnumerable<string>? availableSources;
+    private bool isLoading;
+    private string? errorMessage;
+    private CancellationTokenSource? _loadCancellationTokenSource;
+    private ViewMode currentView = ViewMode.TimeSlots;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAvailableSourcesAsync();
+        await LoadEventsAsync();
+    }
+
+    private async Task LoadAvailableSourcesAsync()
+    {
+        try
+        {
+            availableSources = await EventAggregator.GetAvailableSourcesAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading sources: {ex.Message}");
+        }
+    }
+
+    private async Task LoadEventsAsync()
+    {
+        _loadCancellationTokenSource?.Cancel();
+        _loadCancellationTokenSource?.Dispose();
+        _loadCancellationTokenSource = new CancellationTokenSource();
+
+        var cancellationToken = _loadCancellationTokenSource.Token;
+
+        isLoading = true;
+        errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            events = await EventAggregator.GetEventsForDayAsync(selectedDate, cancellationToken);
+
+            // Convert events to time slots
+            if (events != null && events.Any())
+            {
+                timeSlots = TimeSlotConverter.ConvertEventsToTimeSlots(events);
+            }
+            else
+            {
+                timeSlots = Array.Empty<TimeSlot>();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled - don't show error
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error loading events: {ex.Message}";
+            events = Array.Empty<Event>();
+            timeSlots = Array.Empty<TimeSlot>();
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                isLoading = false;
+                StateHasChanged();
+            }
+        }
+    }
+
+    private async Task LoadTodayAsync()
+    {
+        selectedDate = DateTime.Today;
+        await LoadEventsAsync();
+    }
+
+    private async Task LoadYesterdayAsync()
+    {
+        selectedDate = DateTime.Today.AddDays(-1);
+        await LoadEventsAsync();
+    }
+
+    private async Task LoadPreviousDayAsync()
+    {
+        selectedDate = selectedDate.AddDays(-1);
+        await LoadEventsAsync();
+    }
+
+    private async Task LoadNextDayAsync()
+    {
+        if (selectedDate < DateTime.Today)
+        {
+            selectedDate = selectedDate.AddDays(1);
+            await LoadEventsAsync();
+        }
+    }
+
+    private void SwitchView(ViewMode mode)
+    {
+        currentView = mode;
+    }
+
+    public void Dispose()
+    {
+        _loadCancellationTokenSource?.Cancel();
+        _loadCancellationTokenSource?.Dispose();
+    }
+}
+
+<style>
+    .home-container {
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    h1 {
+        color: #0078d4;
+        margin-bottom: 5px;
+        font-size: 1.5rem;
+        margin-top: 0;
+    }
+
+    .controls {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin: 15px 0;
+        padding: 10px;
+        background-color: #f8f9fa;
+        border-radius: 4px;
+    }
+
+    .date-selector {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+        .date-selector label {
+            font-weight: 600;
+            color: #495057;
+            font-size: 12px;
+        }
+
+        .date-selector input {
+            padding: 5px 8px;
+            border: 1px solid #ced4da;
+            border-radius: 3px;
+            font-size: 13px;
+        }
+
+    .quick-actions {
+        display: flex;
+        gap: 6px;
+        margin-left: auto;
+    }
+
+    .btn {
+        padding: 6px 12px;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        background-color: #0078d4;
+        color: white;
+        font-size: 13px;
+        transition: background-color 0.2s;
+    }
+
+        .btn:hover:not(:disabled) {
+            background-color: #106ebe;
+        }
+
+        .btn:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+
+    .btn-arrow {
+        min-width: 36px;
+        padding: 6px;
+        font-size: 14px;
+    }
+
+    .sources-info {
+        padding: 8px 10px;
+        background-color: #d1ecf1;
+        border-left: 3px solid #0c5460;
+        color: #0c5460;
+        border-radius: 3px;
+        margin-bottom: 10px;
+        font-size: 12px;
+    }
+
+    .error-message {
+        padding: 8px 10px;
+        background-color: #f8d7da;
+        border-left: 3px solid #721c24;
+        color: #721c24;
+        border-radius: 3px;
+        margin-bottom: 10px;
+        font-size: 12px;
+    }
+
+    .view-switcher {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 15px;
+        padding: 3px;
+        background-color: #e9ecef;
+        border-radius: 4px;
+        width: fit-content;
+    }
+
+    .view-btn {
+        padding: 6px 12px;
+        border: none;
+        border-radius: 3px;
+        cursor: pointer;
+        background-color: transparent;
+        color: #495057;
+        font-size: 13px;
+        transition: all 0.2s;
+    }
+
+        .view-btn:hover {
+            background-color: #dee2e6;
+        }
+
+        .view-btn.active {
+            background-color: #0078d4;
+            color: white;
+            font-weight: 600;
+        }
+</style>
+

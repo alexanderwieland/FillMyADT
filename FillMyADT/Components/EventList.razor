@@ -1,0 +1,260 @@
+@using FillMyADT.Models
+
+@if (IsLoading)
+{
+    <div class="loading-container">
+        <div class="spinner"></div>
+        <p>Loading events...</p>
+    </div>
+}
+else if (Events == null || !Events.Any())
+{
+    <div class="no-events">
+        <p>No events found for the selected date.</p>
+    </div>
+}
+else
+{
+    <div class="event-list">
+        <h3>Events Timeline (@Events.Count events)</h3>
+
+        <div class="events">
+            @foreach (var evt in Events)
+            {
+                <div class="event-item @GetEventClass(evt.EventType) @GetSourceClass(evt.Source)">
+                    <div class="event-time">
+                        @evt.Timestamp.ToString("HH:mm:ss")
+                    </div>
+                    <div class="event-source-badge">
+                        @GetSourceBadge(evt.Source)
+                    </div>
+                    <div class="event-details">
+                        <div class="event-type">@evt.EventType</div>
+                        <div class="event-description">@evt.Description</div>
+                        @if (evt.Metadata != null && evt.Metadata.Any())
+                        {
+                            <div class="event-metadata">
+                                @if (evt.Metadata.TryGetValue("TicketNumber", out var ticket))
+                                {
+                                    <span class="metadata-item ticket-number">#@ticket</span>
+                                }
+                                @if (evt.Metadata.TryGetValue("Branch", out var branch))
+                                {
+                                    <span class="metadata-item branch-name">@branch</span>
+                                }
+                                @if (evt.Metadata.TryGetValue("Repository", out var repo))
+                                {
+                                    <span class="metadata-item repo-name">@repo</span>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter]
+    public IReadOnlyList<Event>? Events { get; set; }
+
+    [Parameter]
+    public bool IsLoading { get; set; }
+
+    private static string GetEventClass(string eventType)
+    {
+        return eventType.ToLowerInvariant() switch
+        {
+            // Windows power events
+            "boot" => "event-boot",
+            "shutdown" => "event-shutdown",
+            "unexpected shutdown" => "event-shutdown",
+            "sleep" => "event-sleep",
+            "wake" => "event-wake",
+
+            // Git events
+            var t when t.Contains("commit") => "event-commit",
+            var t when t.Contains("branch") => "event-branch",
+
+            _ => "event-other"
+        };
+    }
+
+    private static string GetSourceClass(string source)
+    {
+        if (source.Contains("Git History", StringComparison.OrdinalIgnoreCase))
+            return "source-git";
+        if (source.Contains("Windows", StringComparison.OrdinalIgnoreCase))
+            return "source-windows";
+        return "source-other";
+    }
+
+    private static string GetSourceBadge(string source)
+    {
+        if (source.Contains("Git History", StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = source.Split(" - ", 2);
+            return parts.Length > 1 ? parts[1] : "Git";
+        }
+        if (source.Contains("Windows", StringComparison.OrdinalIgnoreCase))
+            return "Windows";
+        return source;
+    }
+}
+
+<style>
+    .event-list {
+        margin-top: 10px;
+    }
+
+    .event-list h3 {
+        margin: 0 0 10px 0;
+        font-size: 1.2rem;
+    }
+
+    .events {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 8px;
+    }
+
+    .event-item {
+        display: flex;
+        gap: 10px;
+        padding: 8px 10px;
+        background-color: white;
+        border-left: 3px solid #6c757d;
+        border-radius: 3px;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+    }
+
+    .event-time {
+        font-weight: bold;
+        color: #495057;
+        min-width: 70px;
+        font-family: 'Consolas', monospace;
+        font-size: 12px;
+    }
+
+    .event-source-badge {
+        font-size: 10px;
+        font-weight: 600;
+        padding: 3px 8px;
+        border-radius: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        white-space: nowrap;
+        align-self: flex-start;
+    }
+
+    .source-git .event-source-badge {
+        background-color: #28a745;
+        color: white;
+    }
+
+    .source-windows .event-source-badge {
+        background-color: #0078d4;
+        color: white;
+    }
+
+    .source-other .event-source-badge {
+        background-color: #6c757d;
+        color: white;
+    }
+
+    .source-git {
+        border-left-color: #28a745;
+        background-color: #f8fff9;
+    }
+
+    .source-windows {
+        border-left-color: #0078d4;
+        background-color: #f0f8ff;
+    }
+
+    .event-details {
+        flex: 1;
+    }
+
+    .event-type {
+        font-weight: 600;
+        color: #212529;
+        margin-bottom: 2px;
+        font-size: 13px;
+    }
+
+    .event-description {
+        color: #6c757d;
+        font-size: 12px;
+        margin-bottom: 4px;
+        line-height: 1.3;
+    }
+
+    .event-metadata {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        font-size: 11px;
+    }
+
+    .metadata-item {
+        background-color: #e9ecef;
+        padding: 2px 6px;
+        border-radius: 2px;
+        color: #495057;
+    }
+
+    .metadata-item.ticket-number {
+        background-color: #ffc107;
+        color: #000;
+        font-weight: 600;
+        font-size: 11px;
+    }
+
+    .metadata-item.branch-name {
+        background-color: #17a2b8;
+        color: white;
+        font-weight: 500;
+    }
+
+    .metadata-item.repo-name {
+        background-color: #6c757d;
+        color: white;
+        font-weight: 500;
+    }
+
+    .no-events {
+        padding: 20px;
+        text-align: center;
+        color: #6c757d;
+        font-size: 13px;
+    }
+
+    .loading-container {
+        padding: 40px 20px;
+        text-align: center;
+        color: #6c757d;
+    }
+
+        .loading-container p {
+            margin-top: 15px;
+            font-size: 13px;
+        }
+
+    .spinner {
+        border: 3px solid #f3f3f3;
+        border-top: 3px solid #0078d4;
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        animation: spin 1s linear infinite;
+        margin: 0 auto;
+    }
+
+    @@keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+</style>
