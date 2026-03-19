@@ -1,8 +1,10 @@
 @page "/"
 @using FillMyADT.Services
 @using FillMyADT.Models
+@using System.Text
 @inject EventAggregatorService EventAggregator
 @inject EventToTimeSpanConverter TimeSlotConverter
+@inject IJSRuntime JSRuntime
 @implements IDisposable
 
 <div class="home-container">
@@ -30,6 +32,12 @@
             </button>
             <button class="btn" @onclick="LoadEventsAsync" disabled="@isLoading">
                 @(isLoading ? "Loading..." : "Refresh")
+            </button>
+            <button class="btn btn-copy" @onclick="CopyEventsAsync" disabled="@(events == null || !events.Any())" title="Copy Events to Clipboard">
+                📋 Copy Events
+            </button>
+            <button class="btn btn-copy" @onclick="CopyTimeSlotsAsync" disabled="@(timeSlots == null || !timeSlots.Any())" title="Copy Time Slots to Clipboard">
+                ⏱️ Copy Slots
             </button>
         </div>
     </div>
@@ -70,7 +78,7 @@
 @code {
     private enum ViewMode { Events, TimeSlots }
 
-    private DateTime selectedDate = DateTime.Today;
+    private DateTime selectedDate = DateTime.Today.AddDays(-1); // Start with yesterday
     private IReadOnlyList<Event>? events;
     private IReadOnlyList<TimeSlot>? timeSlots;
     private IEnumerable<string>? availableSources;
@@ -175,6 +183,95 @@
         currentView = mode;
     }
 
+    private async Task CopyEventsAsync()
+    {
+        if (events == null || !events.Any())
+            return;
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"=== Events for {selectedDate:yyyy-MM-dd} ===");
+        sb.AppendLine($"Total: {events.Count} events");
+        sb.AppendLine();
+
+        foreach (var evt in events)
+        {
+            sb.AppendLine($"{evt.Timestamp:HH:mm:ss} - {evt.EventType}");
+            sb.AppendLine($"  Source: {evt.Source}");
+            if (!string.IsNullOrEmpty(evt.Description))
+                sb.AppendLine($"  Description: {evt.Description}");
+            if (evt.Metadata != null && evt.Metadata.Any())
+            {
+                sb.AppendLine("  Metadata:");
+                foreach (var meta in evt.Metadata)
+                    sb.AppendLine($"    {meta.Key}: {meta.Value}");
+            }
+            sb.AppendLine();
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", sb.ToString());
+            Console.WriteLine("Events copied to clipboard!");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to copy events: {ex.Message}");
+            errorMessage = "Failed to copy to clipboard";
+        }
+    }
+
+    private async Task CopyTimeSlotsAsync()
+    {
+        if (timeSlots == null || !timeSlots.Any())
+            return;
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"=== Time Slots for {selectedDate:yyyy-MM-dd} ===");
+
+        var totalMinutes = timeSlots.Sum(s => s.Duration.TotalMinutes);
+        var totalHours = (int)(totalMinutes / 60);
+        var totalMins = (int)(totalMinutes % 60);
+        sb.AppendLine($"Total: {timeSlots.Count} slots, {totalHours}h {totalMins}m");
+        sb.AppendLine();
+
+        foreach (var slot in timeSlots)
+        {
+            var duration = slot.Duration;
+            var hours = (int)duration.TotalHours;
+            var minutes = duration.Minutes;
+            var durationStr = hours > 0 ? $"{hours}h {minutes}m" : $"{minutes}m";
+
+            sb.Append($"{slot.StartTime:HH:mm} - {slot.EndTime:HH:mm} ({durationStr})");
+            if (!string.IsNullOrEmpty(slot.TicketNr))
+                sb.Append($" [#{slot.TicketNr}]");
+            sb.AppendLine();
+
+            sb.AppendLine($"  {slot.Text}");
+
+            if (!string.IsNullOrEmpty(slot.Location))
+                sb.AppendLine($"  📍 {slot.Location}");
+
+            if (slot.Metadata != null && slot.Metadata.Any())
+            {
+                foreach (var meta in slot.Metadata)
+                    sb.AppendLine($"  {meta.Key}: {meta.Value}");
+            }
+
+            sb.AppendLine();
+        }
+
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", sb.ToString());
+            Console.WriteLine("Time slots copied to clipboard!");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to copy time slots: {ex.Message}");
+            errorMessage = "Failed to copy to clipboard";
+        }
+    }
+
     public void Dispose()
     {
         _loadCancellationTokenSource?.Cancel();
@@ -255,6 +352,20 @@
         padding: 6px;
         font-size: 14px;
     }
+
+    .btn-copy {
+        background-color: #28a745;
+        font-size: 12px;
+        padding: 6px 10px;
+    }
+
+        .btn-copy:hover:not(:disabled) {
+            background-color: #218838;
+        }
+
+        .btn-copy:disabled {
+            background-color: #6c757d;
+        }
 
     .sources-info {
         padding: 8px 10px;

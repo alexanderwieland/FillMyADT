@@ -19,15 +19,17 @@ public class WindowsEventSource : IEventSource
 
     public string Name => "Windows Events";
 
-    // Only track boot and shutdown - lunch break is fixed skeleton
+    // Track boot and shutdown events using Kernel-General and Kernel-Power events
     private static readonly Dictionary<(long EventId, string Provider), (string EventType, string Category)> PowerEventIds = new()
     {
-        // Boot - morning startup
-        { (6005, "EventLog"), ("Boot", "System started") },
+        // Boot events from Kernel-General
+        { (1, "Microsoft-Windows-Kernel-General"), ("Boot", "System boot (cold start)") },
+        { (12, "Microsoft-Windows-Kernel-General"), ("Boot", "System resume from hibernation") },
 
-        // Shutdown - evening shutdown
-        { (6006, "EventLog"), ("Shutdown", "System shutdown") },
-        { (6008, "EventLog"), ("Shutdown", "Unexpected shutdown") }
+        // Shutdown events from Kernel-Power
+        { (107, "Microsoft-Windows-Kernel-Power"), ("Shutdown", "System shutdown initiated") },
+        { (42, "Microsoft-Windows-Kernel-Power"), ("Shutdown", "System entering sleep") },
+        { (109, "Microsoft-Windows-Kernel-Power"), ("Shutdown", "System entering hibernation") }
     };
 
     public WindowsEventSource(WindowsEventSourceConfig config)
@@ -57,29 +59,85 @@ public class WindowsEventSource : IEventSource
                 var systemEvents = ReadBootShutdownEvents(systemLog, startDate, endDate, cancellationToken).ToList();
                 events.AddRange(systemEvents);
 
-                // Add lunch break skeleton events if we have a boot event
-                var bootEvent = events.FirstOrDefault(e => e.EventType == "Boot");
-                if (bootEvent != null)
-                {
-                    var date = bootEvent.Timestamp.Date;
-                    
-                    // Add lunch break start event (12:00 PM by default)
-                    events.Add(new Event
-                    {
-                        Source = Name,
-                        Timestamp = new DateTime(date.Year, date.Month, date.Day, 12, 0, 0),
-                        EventType = "Lunch Break Start",
-                        Description = "Lunch break begins"
-                    });
+                // Add lunch break skeleton events for each day that has boot or shutdown events
+                var daysWithEvents = systemEvents
+                    .Select(e => e.Timestamp.Date)
+                    .Distinct()
+                    .OrderBy(d => d)
+                    .ToList();
 
-                    // Add lunch break end event (12:30 PM by default)
-                    events.Add(new Event
+                Log.Debug("Processing lunch breaks for {DayCount} unique days", daysWithEvents.Count);
+
+                foreach (var date in daysWithEvents)
+                {
+                    Log.Debug("Processing lunch break for date: {Date}", date.ToShortDateString());
+
+                    // Find first Kernel-Power event after 11:00 AM (likely lunch break)
+                    var lunchTimeCandidate = FindLunchBreakTime(systemLog, date);
+
+                    if (lunchTimeCandidate.HasValue)
                     {
-                        Source = Name,
-                        Timestamp = new DateTime(date.Year, date.Month, date.Day, 12, 30, 0),
-                        EventType = "Lunch Break End",
-                        Description = "Lunch break ends"
-                    });
+                        var originalTime = lunchTimeCandidate.Value;
+                        var lunchStart = RoundToNextQuarterHour(originalTime);
+                        var lunchEnd = lunchStart.AddMinutes(30);
+
+                        Log.Debug("Detected lunch break for {Date}: {Start} - {End} (from event at {Original})",
+                            date.ToShortDateString(), lunchStart.ToString("HH:mm"), lunchEnd.ToString("HH:mm"), originalTime.ToString("HH:mm"));
+
+                        Log.Information("Adding lunch break events for {Date}: Start={Start}, End={End}", 
+                            date.ToShortDateString(), lunchStart.ToString("yyyy-MM-dd HH:mm:ss"), lunchEnd.ToString("yyyy-MM-dd HH:mm:ss"));
+
+                        events.Add(new Event
+                        {
+                            Source = Name,
+                            Timestamp = lunchStart,
+                            EventType = "Lunch Break Start",
+                            Description = "Lunch break begins (detected from system activity)",
+                            Metadata = new Dictionary<string, string>
+                            {
+                                ["OriginalTime"] = originalTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                                ["RoundedTime"] = lunchStart.ToString("yyyy-MM-dd HH:mm:ss"),
+                                ["DetectionMethod"] = "Kernel-Power event"
+                            }
+                        });
+
+                        events.Add(new Event
+                        {
+                            Source = Name,
+                            Timestamp = lunchEnd,
+                            EventType = "Lunch Break End",
+                            Description = "Lunch break ends",
+                            Metadata = new Dictionary<string, string>
+                            {
+                                ["OriginalTime"] = originalTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                                ["RoundedTime"] = lunchStart.ToString("yyyy-MM-dd HH:mm:ss"),
+                                ["Duration"] = "30 minutes"
+                            }
+                        });
+                    }
+                    else
+                    {
+                        // Fallback to default 12:00-12:30 if no lunch event detected
+                        Log.Debug("No lunch break detected for {Date}, using default 12:00-12:30", date.ToShortDateString());
+
+                        Log.Information("Adding default lunch break events for {Date}: Start=12:00, End=12:30", date.ToShortDateString());
+
+                        events.Add(new Event
+                        {
+                            Source = Name,
+                            Timestamp = new DateTime(date.Year, date.Month, date.Day, 12, 0, 0),
+                            EventType = "Lunch Break Start",
+                            Description = "Lunch break begins (default time)"
+                        });
+
+                        events.Add(new Event
+                        {
+                            Source = Name,
+                            Timestamp = new DateTime(date.Year, date.Month, date.Day, 12, 30, 0),
+                            EventType = "Lunch Break End",
+                            Description = "Lunch break ends"
+                        });
+                    }
                 }
 
                 Log.Information("Found {EventCount} daily skeleton events (Boot/Lunch Start/Lunch End/Shutdown)", events.Count);
@@ -99,31 +157,83 @@ public class WindowsEventSource : IEventSource
 
         try
         {
-            var entries = eventLog.Entries.Cast<EventLogEntry>()
+            var allEntries = eventLog.Entries.Cast<EventLogEntry>()
                 .Where(e => e.TimeGenerated >= startDate && e.TimeGenerated <= endDate)
                 .Where(e => IsBootOrShutdownEvent(e))
-                .OrderBy(e => e.TimeGenerated)
+                .Select(e => new
+                {
+                    Entry = e,
+                    Date = e.TimeGenerated.Date,
+                    Info = GetEventInfo(e)
+                })
                 .ToList();
 
-            foreach (var entry in entries)
+            Log.Debug("Found {TotalCount} Kernel boot/shutdown events in date range", allEntries.Count);
+
+            // Group by date and get first boot and last shutdown for each day
+            var eventsByDay = allEntries.GroupBy(e => e.Date);
+
+            foreach (var dayGroup in eventsByDay)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var (eventType, category) = GetEventInfo(entry);
+                var date = dayGroup.Key;
+                var dayEvents = dayGroup.ToList();
 
-                events.Add(new Event
+                var bootCount = dayEvents.Count(e => e.Info.EventType == "Boot");
+                var shutdownCount = dayEvents.Count(e => e.Info.EventType == "Shutdown");
+
+                Log.Debug("Day {Date}: {BootCount} boot events, {ShutdownCount} shutdown events",
+                    date.ToShortDateString(), bootCount, shutdownCount);
+
+                // Get first boot event of the day (morning start)
+                var firstBoot = dayEvents
+                    .Where(e => e.Info.EventType == "Boot")
+                    .OrderBy(e => e.Entry.TimeGenerated)
+                    .FirstOrDefault();
+
+                if (firstBoot != null)
                 {
-                    Source = Name,
-                    Timestamp = entry.TimeGenerated,
-                    EventType = eventType,
-                    Description = category,
-                    Metadata = new Dictionary<string, string>
+                    Log.Debug("Adding morning boot event at {Time}", firstBoot.Entry.TimeGenerated);
+                    events.Add(new Event
                     {
-                        ["EventId"] = entry.InstanceId.ToString(),
-                        ["Source"] = entry.Source
-                    }
-                });
+                        Source = Name,
+                        Timestamp = firstBoot.Entry.TimeGenerated,
+                        EventType = firstBoot.Info.EventType,
+                        Description = firstBoot.Info.Category,
+                        Metadata = new Dictionary<string, string>
+                        {
+                            ["EventId"] = firstBoot.Entry.InstanceId.ToString(),
+                            ["Source"] = firstBoot.Entry.Source
+                        }
+                    });
+                }
+
+                // Get last shutdown event of the day (evening end)
+                var lastShutdown = dayEvents
+                    .Where(e => e.Info.EventType == "Shutdown")
+                    .OrderByDescending(e => e.Entry.TimeGenerated)
+                    .FirstOrDefault();
+
+                if (lastShutdown != null)
+                {
+                    Log.Debug("Adding evening shutdown event at {Time}", lastShutdown.Entry.TimeGenerated);
+                    events.Add(new Event
+                    {
+                        Source = Name,
+                        Timestamp = lastShutdown.Entry.TimeGenerated,
+                        EventType = lastShutdown.Info.EventType,
+                        Description = lastShutdown.Info.Category,
+                        Metadata = new Dictionary<string, string>
+                        {
+                            ["EventId"] = lastShutdown.Entry.InstanceId.ToString(),
+                            ["Source"] = lastShutdown.Entry.Source
+                        }
+                    });
+                }
             }
+
+            Log.Debug("ReadBootShutdownEvents returning {Count} events", events.Count);
         }
         catch (Exception ex)
         {
@@ -135,12 +245,14 @@ public class WindowsEventSource : IEventSource
 
     private static bool IsBootOrShutdownEvent(EventLogEntry entry)
     {
+        // For Kernel events, InstanceId equals EventID
         var key = (entry.InstanceId, entry.Source);
         return PowerEventIds.ContainsKey(key);
     }
 
     private static (string EventType, string Category) GetEventInfo(EventLogEntry entry)
     {
+        // For Kernel events, InstanceId equals EventID
         var key = (entry.InstanceId, entry.Source);
         if (PowerEventIds.TryGetValue(key, out var info))
         {
@@ -148,6 +260,55 @@ public class WindowsEventSource : IEventSource
         }
 
         return ("System Event", "Unknown event");
+    }
+
+    /// <summary>
+    /// Find the first Kernel-Power event after 11:00 AM on the given date.
+    /// Any Kernel-Power event likely indicates when the user took a lunch break.
+    /// </summary>
+    private static DateTime? FindLunchBreakTime(EventLog eventLog, DateTime date)
+    {
+        try
+        {
+            var lunchWindowStart = new DateTime(date.Year, date.Month, date.Day, 11, 0, 0);
+            var lunchWindowEnd = new DateTime(date.Year, date.Month, date.Day, 14, 0, 0); // Search until 2 PM
+
+            var lunchEvent = eventLog.Entries.Cast<EventLogEntry>()
+                .Where(e => e.TimeGenerated >= lunchWindowStart && e.TimeGenerated <= lunchWindowEnd)
+                .Where(e => e.Source == "Microsoft-Windows-Kernel-Power") // Accept ANY Kernel-Power event
+                .OrderBy(e => e.TimeGenerated)
+                .FirstOrDefault();
+
+            if (lunchEvent != null)
+            {
+                Log.Debug("Found lunch break candidate: EventID {EventId} at {Time}", 
+                    lunchEvent.InstanceId, lunchEvent.TimeGenerated.ToString("HH:mm:ss"));
+            }
+
+            return lunchEvent?.TimeGenerated;
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Error finding lunch break time for {Date}", date.ToShortDateString());
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Round a DateTime to the next quarter hour (00, 15, 30, 45).
+    /// Example: 11:47 → 12:00, 11:13 → 11:15, 12:00 → 12:00
+    /// </summary>
+    private static DateTime RoundToNextQuarterHour(DateTime time)
+    {
+        var minutes = time.Minute;
+        var roundedMinutes = (int)Math.Ceiling(minutes / 15.0) * 15;
+
+        if (roundedMinutes == 60)
+        {
+            return new DateTime(time.Year, time.Month, time.Day, time.Hour, 0, 0).AddHours(1);
+        }
+
+        return new DateTime(time.Year, time.Month, time.Day, time.Hour, roundedMinutes, 0);
     }
 
     public Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default)

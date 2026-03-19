@@ -31,14 +31,45 @@ else
                         </div>
                     </div>
                     <div class="timeslot-details">
-                        @if (!string.IsNullOrEmpty(slot.TicketNr))
+                        <div class="timeslot-header">
+                            @if (!string.IsNullOrEmpty(slot.TicketNr))
+                            {
+                                <div class="ticket-badge">#@slot.TicketNr</div>
+                            }
+                            <div class="timeslot-text">@slot.Text</div>
+                        </div>
+
+                        @if (!string.IsNullOrEmpty(slot.Location) || (slot.Metadata != null && slot.Metadata.Any()))
                         {
-                            <div class="ticket-badge">#@slot.TicketNr</div>
-                        }
-                        <div class="timeslot-text">@slot.Text</div>
-                        @if (!string.IsNullOrEmpty(slot.Location))
-                        {
-                            <div class="timeslot-location">📍 @slot.Location</div>
+                            <div class="timeslot-metadata">
+                                @if (!string.IsNullOrEmpty(slot.Location))
+                                {
+                                    <span class="metadata-tag location-tag">📍 @slot.Location</span>
+                                }
+                                @if (slot.Metadata != null)
+                                {
+                                    @if (slot.Metadata.TryGetValue("Branch", out var branch))
+                                    {
+                                        <span class="metadata-tag branch-tag">🌿 @branch</span>
+                                    }
+                                    @if (slot.Metadata.TryGetValue("Repository", out var repo))
+                                    {
+                                        <span class="metadata-tag repo-tag">📦 @repo</span>
+                                    }
+                                    @if (slot.Metadata.TryGetValue("OriginalTime", out var originalTime))
+                                    {
+                                        <span class="metadata-tag time-tag">🕐 Original: @DateTime.Parse(originalTime).ToString("HH:mm")</span>
+                                    }
+                                    @if (slot.Metadata.TryGetValue("DetectionMethod", out var method))
+                                    {
+                                        <span class="metadata-tag method-tag">🔍 @method</span>
+                                    }
+                                    @if (slot.Metadata.TryGetValue("Duration", out var duration))
+                                    {
+                                        <span class="metadata-tag duration-tag">⏱️ @duration</span>
+                                    }
+                                }
+                            </div>
                         }
                     </div>
                 </div>
@@ -142,7 +173,14 @@ else
         flex: 1;
         display: flex;
         flex-direction: column;
-        gap: 3px;
+        gap: 6px;
+    }
+
+    .timeslot-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
     }
 
     .ticket-badge {
@@ -150,22 +188,68 @@ else
         color: #000;
         font-weight: 600;
         font-size: 11px;
-        padding: 2px 6px;
-        border-radius: 2px;
+        padding: 3px 8px;
+        border-radius: 3px;
         display: inline-block;
-        width: fit-content;
     }
 
     .timeslot-text {
         color: #212529;
         font-size: 12px;
         line-height: 1.3;
+        flex: 1;
     }
 
-    .timeslot-location {
-        color: #6c757d;
-        font-size: 11px;
-        font-style: italic;
+    .timeslot-metadata {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 2px;
+    }
+
+    .metadata-tag {
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 2px;
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        white-space: nowrap;
+    }
+
+    .location-tag {
+        background-color: #e9ecef;
+        color: #495057;
+    }
+
+    .branch-tag {
+        background-color: #17a2b8;
+        color: white;
+        font-weight: 500;
+    }
+
+    .repo-tag {
+        background-color: #6c757d;
+        color: white;
+        font-weight: 500;
+    }
+
+    .time-tag {
+        background-color: #ffc107;
+        color: #000;
+        font-weight: 500;
+    }
+
+    .method-tag {
+        background-color: #17a2b8;
+        color: white;
+        font-weight: 500;
+    }
+
+    .duration-tag {
+        background-color: #28a745;
+        color: white;
+        font-weight: 500;
     }
 
     .no-events {

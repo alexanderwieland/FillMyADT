@@ -36,6 +36,11 @@ public record TimeSlot
     public string? Location { get; init; }
 
     /// <summary>
+    /// Additional metadata from the source event
+    /// </summary>
+    public Dictionary<string, string>? Metadata { get; init; }
+
+    /// <summary>
     /// Duration of the time slot
     /// </summary>
     public TimeSpan Duration => EndTime - StartTime;

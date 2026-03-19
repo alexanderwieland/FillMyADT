@@ -433,8 +433,16 @@ public class EventToTimeSpanConverter
     /// </summary>
     private void CreateGranularSlotsWithMeetings(List<TimeSlot> timeSlots, DateOnly date, TimeOnly workStart, TimeOnly workEnd, List<Event> workEvents, List<CalendarMeeting> meetings, List<(DateTime Time, string Branch, string? Ticket)> branchHistory)
     {
-        // Detect lunch break from meetings
-        var lunchBreak = DetectLunchBreakFromMeetings(meetings);
+        // Check if lunch break is already in meetings (from WindowsEventSource)
+        var hasLunchBreakMeeting = meetings.Any(m => m.Subject == "Lunch Break");
+
+        // Detect lunch break from meetings ONLY if not already present
+        var lunchBreak = hasLunchBreakMeeting ? null : DetectLunchBreakFromMeetings(meetings);
+
+        if (hasLunchBreakMeeting)
+        {
+            Log.Debug("Lunch break already in meetings list, skipping detection");
+        }
 
         var currentTime = workStart;
         var lunchBreakInserted = false;
@@ -731,8 +739,23 @@ public class EventToTimeSpanConverter
             return "Work";
         }
 
+        // Filter out lunch break and other skeleton events - we only want actual work events
+        var actualWorkEvents = workEvents
+            .Where(e => e.EventType != "Lunch Break Start" && 
+                       e.EventType != "Lunch Break End" &&
+                       e.EventType != "Boot" &&
+                       e.EventType != "Shutdown" &&
+                       e.EventType != "CalendarMeetingStart" &&
+                       e.EventType != "CalendarMeetingEnd")
+            .ToList();
+
+        if (actualWorkEvents.Count == 0)
+        {
+            return "Work";
+        }
+
         // Prefer commit messages
-        var commits = workEvents.Where(e => e.EventType.Contains("Commit", StringComparison.OrdinalIgnoreCase)).ToList();
+        var commits = actualWorkEvents.Where(e => e.EventType.Contains("Commit", StringComparison.OrdinalIgnoreCase)).ToList();
         if (commits.Any())
         {
             // Use the most recent or most detailed commit message
@@ -742,8 +765,8 @@ public class EventToTimeSpanConverter
             return bestCommit.Description ?? bestCommit.EventType;
         }
 
-        // Fall back to first event's description
-        var firstEvent = workEvents[0];
+        // Fall back to first actual work event's description
+        var firstEvent = actualWorkEvents[0];
         return !string.IsNullOrWhiteSpace(firstEvent.Description) 
             ? firstEvent.Description 
             : firstEvent.EventType;
