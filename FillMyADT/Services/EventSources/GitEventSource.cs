@@ -18,9 +18,10 @@ public class GitEventSource : IEventSource
     private readonly Regex _ticketPattern;
 
     // Performance constants
-    private const int MaxCommitsPerRepo = 100;  // Limit commits per repo
-    private const int MaxReflogEntries = 50;    // Limit reflog entries
-    private const int GitCommandTimeoutSeconds = 10;  // Timeout for git commands
+    private const int MaxCommitsPerRepo = 50;   // Limit commits per repo (reduced from 100)
+    private const int MaxReflogEntries = 20;     // Limit reflog entries (reduced from 50)
+    private const int GitCommandTimeoutSeconds = 5;  // Timeout for git commands (reduced from 10)
+
 
     public string Name => "Git History";
 
@@ -83,15 +84,16 @@ public class GitEventSource : IEventSource
 
         if (_config.FilterByRecentActivity)
         {
-            var activeRepos = new List<string>();
-            foreach (var repoPath in _repositoryPaths)
+            // OPTIMIZATION: Check repos in parallel (much faster for many repos!)
+            var activityTasks = _repositoryPaths.Select(async repoPath =>
             {
-                var repoName = Path.GetFileName(repoPath);
-                if (await HasRecentActivityAsync(repoPath, startDate, endDate, cancellationToken))
-                {
-                    activeRepos.Add(repoPath);
-                }
-            }
+                var hasActivity = await HasRecentActivityAsync(repoPath, startDate, endDate, cancellationToken);
+                return (repoPath, hasActivity);
+            });
+
+            var results = await Task.WhenAll(activityTasks);
+            var activeRepos = results.Where(r => r.hasActivity).Select(r => r.repoPath).ToList();
+
             reposToScan = activeRepos;
             Log.Information("GitEventSource: Scanning {ActiveCount} of {TotalCount} repositories with recent activity",
                 activeRepos.Count, _repositoryPaths.Count);
@@ -130,18 +132,38 @@ public class GitEventSource : IEventSource
     private async Task<IEnumerable<Event>> GetEventsFromRepositoryAsync(string repoPath, DateTime startDate, DateTime endDate, CancellationToken cancellationToken)
     {
         var events = new List<Event>();
+        var repoName = Path.GetFileName(repoPath);
+        var sw = Stopwatch.StartNew();
 
-        if (_config.IncludeCommits)
+        // Use Task.WhenAll to run commits and reflog queries in parallel (if both enabled)
+        if (_config.IncludeCommits && _config.IncludeBranchSwitches)
         {
-            var commits = await GetCommitsAsync(repoPath, startDate, endDate, cancellationToken);
-            events.AddRange(commits);
+            var commitTask = GetCommitsAsync(repoPath, startDate, endDate, cancellationToken);
+            var reflogTask = GetReflogEventsAsync(repoPath, startDate, endDate, cancellationToken);
+
+            await Task.WhenAll(commitTask, reflogTask);
+
+            events.AddRange(await commitTask);
+            events.AddRange(await reflogTask);
+        }
+        else
+        {
+            if (_config.IncludeCommits)
+            {
+                var commits = await GetCommitsAsync(repoPath, startDate, endDate, cancellationToken);
+                events.AddRange(commits);
+            }
+
+            if (_config.IncludeBranchSwitches)
+            {
+                var reflogEvents = await GetReflogEventsAsync(repoPath, startDate, endDate, cancellationToken);
+                events.AddRange(reflogEvents);
+            }
         }
 
-        if (_config.IncludeBranchSwitches)
-        {
-            var reflogEvents = await GetReflogEventsAsync(repoPath, startDate, endDate, cancellationToken);
-            events.AddRange(reflogEvents);
-        }
+        sw.Stop();
+        Log.Debug("GitEventSource: {RepoName} processed in {ElapsedMs}ms ({EventCount} events)", 
+            repoName, sw.ElapsedMilliseconds, events.Count);
 
         return events;
     }
