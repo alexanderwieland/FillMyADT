@@ -31,14 +31,19 @@ public record OutlookEventSourceConfig : EventSourceConfig
     public bool RequireRunningInstance { get; init; } = false;
 
     /// <summary>
-    /// Subject name for home office whole-day events
+    /// Suffix for home office whole-day events (will be combined with user initials)
     /// </summary>
-    public string HomeOfficeEventName { get; init; } = "apw - HO";
+    public string HomeOfficeSuffix { get; init; } = "HO";
 
     /// <summary>
-    /// Subject name for holiday/vacation whole-day events
+    /// Suffix for holiday/vacation whole-day events (will be combined with user initials)
     /// </summary>
-    public string HolidayEventName { get; init; } = "apw - Urlaub";
+    public string HolidaySuffix { get; init; } = "Urlaub";
+
+    /// <summary>
+    /// Suffix for time compensation (Zeitausgleich) whole-day events (will be combined with user initials)
+    /// </summary>
+    public string ZeitausgleichSuffix { get; init; } = "ZA";
 
     /// <summary>
     /// Enable special handling for whole-day home office and holiday events

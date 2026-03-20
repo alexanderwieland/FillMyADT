@@ -12,6 +12,8 @@ namespace FillMyADT.Services.EventSources;
 /// </summary>
 public class GitEventSource : IEventSource
 {
+    private static readonly ILogger Log = Serilog.Log.ForContext<GitEventSource>();
+
     private readonly GitEventSourceConfig _config;
     private readonly List<string> _repositoryPaths;
     private static readonly Regex _reflogPattern = new(@"(?<ref>[^\s]+)\s+HEAD@{[^}]+}:\s+(?<action>.+?):\s+(?<date>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", RegexOptions.Compiled);

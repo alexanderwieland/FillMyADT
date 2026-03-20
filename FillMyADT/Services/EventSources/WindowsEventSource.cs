@@ -1,7 +1,7 @@
-using System.Diagnostics;
 using FillMyADT.Models;
 using FillMyADT.Models.Configuration;
 using Serilog;
+using System.Diagnostics;
 
 namespace FillMyADT.Services.EventSources;
 
@@ -16,6 +16,8 @@ namespace FillMyADT.Services.EventSources;
 public class WindowsEventSource : IEventSource
 {
     private readonly WindowsEventSourceConfig _config;
+
+    private static readonly ILogger Log = Serilog.Log.ForContext<WindowsEventSource>();
 
     public string Name => "Windows Events";
 
@@ -84,7 +86,7 @@ public class WindowsEventSource : IEventSource
                         Log.Debug("Detected lunch break for {Date}: {Start} - {End} (from event at {Original})",
                             date.ToShortDateString(), lunchStart.ToString("HH:mm"), lunchEnd.ToString("HH:mm"), originalTime.ToString("HH:mm"));
 
-                        Log.Information("Adding lunch break events for {Date}: Start={Start}, End={End}", 
+                        Log.Information("Adding lunch break events for {Date}: Start={Start}, End={End}",
                             date.ToShortDateString(), lunchStart.ToString("yyyy-MM-dd HH:mm:ss"), lunchEnd.ToString("yyyy-MM-dd HH:mm:ss"));
 
                         events.Add(new Event
@@ -281,7 +283,7 @@ public class WindowsEventSource : IEventSource
 
             if (lunchEvent != null)
             {
-                Log.Debug("Found lunch break candidate: EventID {EventId} at {Time}", 
+                Log.Debug("Found lunch break candidate: EventID {EventId} at {Time}",
                     lunchEvent.InstanceId, lunchEvent.TimeGenerated.ToString("HH:mm:ss"));
             }
 

@@ -46,6 +46,11 @@ public enum TimeSlotCategory
     Holiday,
 
     /// <summary>
+    /// Time compensation day (Zeitausgleich)
+    /// </summary>
+    Zeitausgleich,
+
+    /// <summary>
     /// Uncategorized or unknown
     /// </summary>
     Other

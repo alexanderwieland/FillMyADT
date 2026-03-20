@@ -12,14 +12,28 @@ namespace FillMyADT.Services.EventSources;
 [SupportedOSPlatform("windows")]
 public class OutlookEventSource : IEventSource
 {
+    private static readonly ILogger Log = Serilog.Log.ForContext<OutlookEventSource>();
+
     private readonly OutlookEventSourceConfig _config;
+    private readonly AppConfiguration _appConfig;
+    private readonly string _homeOfficeEventName;
+    private readonly string _holidayEventName;
+    private readonly string _zeitausgleichEventName;
 
     public string Name => "Outlook Calendar";
 
-    public OutlookEventSource(OutlookEventSourceConfig config)
+    public OutlookEventSource(OutlookEventSourceConfig config, AppConfiguration appConfig)
     {
         ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(appConfig);
+
         _config = config;
+        _appConfig = appConfig;
+
+        // Construct full event names from initials and suffixes
+        _homeOfficeEventName = $"{appConfig.Initials} - {config.HomeOfficeSuffix}";
+        _holidayEventName = $"{appConfig.Initials} - {config.HolidaySuffix}";
+        _zeitausgleichEventName = $"{appConfig.Initials} - {config.ZeitausgleichSuffix}";
     }
 
     [DllImport("oleaut32.dll", PreserveSig = false)]
@@ -109,8 +123,13 @@ public class OutlookEventSource : IEventSource
                     items.Sort("[Start]");
                     items.IncludeRecurrences = true;
 
-                    var filter = $"[Start] >= '{startDate:g}' AND [End] <= '{endDate:g}'";
+                    // Use proper range filter: events that start before endDate+1day AND end after startDate
+                    // This properly handles all-day events which have End set to midnight of the next day
+                    var endDatePlusOne = endDate.AddDays(1);
+                    var filter = $"[Start] < '{endDatePlusOne:g}' AND [End] > '{startDate:g}'";
                     var restrictedItems = items.Restrict(filter);
+
+                    Log.Debug("Outlook filter: [Start] < '{EndDatePlusOne:g}' AND [End] > '{StartDate:g}'", endDatePlusOne, startDate);
 
                     foreach (dynamic item in restrictedItems)
                     {
@@ -125,7 +144,14 @@ public class OutlookEventSource : IEventSource
                             string location = item.Location ?? string.Empty;
                             bool isAllDay = item.AllDayEvent;
 
-                            // Check for special whole-day events (HO and Urlaub)
+                            // Log all-day events for debugging
+                            if (isAllDay)
+                            {
+                                Log.Debug("Found all-day event: '{Subject}' (EnableSpecialWholeDayEvents={Enable})", 
+                                    subject, _config.EnableSpecialWholeDayEvents);
+                            }
+
+                            // Check for special whole-day events (HO, Urlaub, and Zeitausgleich)
                             if (isAllDay && _config.EnableSpecialWholeDayEvents && IsSpecialWholeDayEvent(subject, out var specialEventType))
                             {
                                 // Create a single special event instead of start/end pair
@@ -286,7 +312,7 @@ public class OutlookEventSource : IEventSource
     }
 
     /// <summary>
-    /// Check if the event subject indicates a special whole-day event (Home Office or Holiday)
+    /// Check if the event subject indicates a special whole-day event (Home Office, Holiday, or Zeitausgleich)
     /// </summary>
     private bool IsSpecialWholeDayEvent(string subject, out string eventType)
     {
@@ -295,17 +321,31 @@ public class OutlookEventSource : IEventSource
         if (string.IsNullOrWhiteSpace(subject))
             return false;
 
+        // Log configured event names for debugging
+        Log.Debug("Checking subject '{Subject}' against: HO='{HO}', Holiday='{Holiday}', ZA='{ZA}'", 
+            subject, _homeOfficeEventName, _holidayEventName, _zeitausgleichEventName);
+
         // Check for Home Office event
-        if (subject.Equals(_config.HomeOfficeEventName, StringComparison.OrdinalIgnoreCase))
+        if (subject.Equals(_homeOfficeEventName, StringComparison.OrdinalIgnoreCase))
         {
             eventType = "SpecialWholeDay-Homeoffice";
+            Log.Information("Detected Home Office event: '{Subject}'", subject);
             return true;
         }
 
         // Check for Holiday/Vacation event
-        if (subject.Equals(_config.HolidayEventName, StringComparison.OrdinalIgnoreCase))
+        if (subject.Equals(_holidayEventName, StringComparison.OrdinalIgnoreCase))
         {
             eventType = "SpecialWholeDay-Holiday";
+            Log.Information("Detected Holiday event: '{Subject}'", subject);
+            return true;
+        }
+
+        // Check for Zeitausgleich event
+        if (subject.Equals(_zeitausgleichEventName, StringComparison.OrdinalIgnoreCase))
+        {
+            eventType = "SpecialWholeDay-Zeitausgleich";
+            Log.Information("Detected Zeitausgleich event: '{Subject}'", subject);
             return true;
         }
 

@@ -10,6 +10,8 @@ namespace FillMyADT.Services;
 /// </summary>
 public class ConfigurationService
 {
+    private static readonly ILogger Log = Serilog.Log.ForContext<ConfigurationService>();
+
     private readonly string _configDirectory;
     private readonly string _configFilePath;
     private readonly JsonSerializerOptions _jsonOptions;
@@ -24,7 +26,11 @@ public class ConfigurationService
         {
             WriteIndented = true,
             PropertyNameCaseInsensitive = true,
-            Converters = { new JsonStringEnumConverter() }
+            Converters = 
+            { 
+                new JsonStringEnumConverter(),
+                new EventSourceConfigConverter()
+            }
         };
 
         EnsureConfigDirectoryExists();
@@ -184,5 +190,57 @@ public class ConfigurationService
 /// </summary>
 public class AppConfiguration
 {
+    /// <summary>
+    /// User initials for event names (e.g., "apw")
+    /// </summary>
+    public string Initials { get; set; } = "apw";
+
+    /// <summary>
+    /// Default work hours for holiday/vacation days (e.g., 6.4 for 6 hours 24 minutes)
+    /// </summary>
+    public double WorkHours { get; set; } = 6.4;
+
+    /// <summary>
+    /// Default location for time slots when not in home office
+    /// </summary>
+    public string DefaultLocation { get; set; } = "WV";
+
+    /// <summary>
+    /// Event source configurations
+    /// </summary>
     public List<EventSourceConfig> EventSources { get; set; } = [];
+}
+
+/// <summary>
+/// Custom JSON converter for EventSourceConfig to handle polymorphism
+/// </summary>
+public class EventSourceConfigConverter : JsonConverter<EventSourceConfig>
+{
+    public override EventSourceConfig Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var doc = JsonDocument.ParseValue(ref reader);
+        var root = doc.RootElement;
+
+        if (!root.TryGetProperty("SourceType", out var sourceTypeElement))
+        {
+            throw new JsonException("SourceType property is required");
+        }
+
+        var sourceType = sourceTypeElement.GetString();
+        var json = root.GetRawText();
+
+        return sourceType switch
+        {
+            "WindowsEventSource" => JsonSerializer.Deserialize<WindowsEventSourceConfig>(json, options)!,
+            "GitEventSource" => JsonSerializer.Deserialize<GitEventSourceConfig>(json, options)!,
+            "OutlookEventSource" => JsonSerializer.Deserialize<OutlookEventSourceConfig>(json, options)!,
+            "EdgeEventSource" => JsonSerializer.Deserialize<EdgeEventSourceConfig>(json, options)!,
+            _ => throw new JsonException($"Unknown SourceType: {sourceType}")
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, EventSourceConfig value, JsonSerializerOptions options)
+    {
+        JsonSerializer.Serialize(writer, value, value.GetType(), options);
+    }
 }

@@ -5,6 +5,7 @@ namespace FillMyADT.Models.Configuration;
 /// </summary>
 public record WindowsEventSourceConfig : EventSourceConfig
 {
+
     public WindowsEventSourceConfig() : base()
     {
         SourceType = "WindowsEventSource";

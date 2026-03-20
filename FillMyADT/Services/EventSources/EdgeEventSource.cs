@@ -13,6 +13,8 @@ namespace FillMyADT.Services.EventSources;
 /// </summary>
 public class EdgeEventSource : IEventSource
 {
+    private static readonly ILogger Log = Serilog.Log.ForContext<EdgeEventSource>();
+
     private readonly EdgeEventSourceConfig _config;
     private readonly List<CompiledTicketPattern> _compiledPatterns;
 

@@ -9,6 +9,8 @@ namespace FillMyADT.Services.BrowserHistory;
 /// </summary>
 internal class EdgeHistoryReader
 {
+    private static readonly ILogger Log = Serilog.Log.ForContext<EdgeHistoryReader>();
+
     private const long ChromeEpochMicroseconds = 11644473600000000; // Microseconds from 1601-01-01 to 1970-01-01
 
     /// <summary>
@@ -40,18 +42,8 @@ internal class EdgeHistoryReader
         }
         finally
         {
-            // Clean up temp file
-            try
-            {
-                if (File.Exists(tempDbPath))
-                {
-                    File.Delete(tempDbPath);
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Debug(ex, "Failed to delete temp database file {Path}", tempDbPath);
-            }
+            // Clean up temp file with retry logic
+            await CleanupTempFileAsync(tempDbPath);
         }
     }
 
@@ -146,6 +138,45 @@ internal class EdgeHistoryReader
         var unixMicroseconds = chromiumTimestamp - ChromeEpochMicroseconds;
         var unixMilliseconds = unixMicroseconds / 1000;
         return DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds).LocalDateTime;
+    }
+
+    /// <summary>
+    /// Clean up temp database file with retry logic to handle file locks
+    /// </summary>
+    private static async Task CleanupTempFileAsync(string tempDbPath)
+    {
+        if (!File.Exists(tempDbPath))
+            return;
+
+        // Give SQLite some time to release the file handle
+        for (int i = 0; i < 3; i++)
+        {
+            try
+            {
+                // Force garbage collection to release any lingering file handles
+                if (i > 0)
+                {
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    await Task.Delay(100 * i); // Exponential backoff: 100ms, 200ms
+                }
+
+                File.Delete(tempDbPath);
+                Log.Debug("Deleted temp database file: {TempPath}", tempDbPath);
+                return;
+            }
+            catch (IOException) when (i < 2)
+            {
+                Log.Debug("Temp file still locked, retry attempt {Attempt}/3: {Path}", i + 1, tempDbPath);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Failed to delete temp database file after {Attempts} attempts: {Path}", i + 1, tempDbPath);
+                return;
+            }
+        }
+
+        Log.Debug("Could not delete temp file after retries (file may be cleaned up later): {Path}", tempDbPath);
     }
 }
 

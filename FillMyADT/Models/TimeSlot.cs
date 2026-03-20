@@ -33,7 +33,7 @@ public record TimeSlot
     /// <summary>
     /// Location for the time slot (to be added later)
     /// </summary>
-    public string? Location { get; init; }
+    public string? Location { get; set; }
 
     /// <summary>
     /// Additional metadata from the source event

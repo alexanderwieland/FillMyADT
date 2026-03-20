@@ -1,4 +1,5 @@
 using FillMyADT.Models;
+using FillMyADT.Models.Configuration;
 using FillMyADT.Services.EventSources;
 using Serilog;
 
@@ -11,7 +12,10 @@ namespace FillMyADT.Services;
 /// </summary>
 public class EventToTimeSpanConverter
 {
+    private static readonly ILogger Log = Serilog.Log.ForContext<EventToTimeSpanConverter>();
+
     private readonly GitEventSource? _gitEventSource;
+    private readonly AppConfiguration? _appConfig;
 
     private const int StandardRoundingMinutes = 15;
     private const int FirstSlotRoundingMinutes = 5;
@@ -26,9 +30,10 @@ public class EventToTimeSpanConverter
     private static readonly TimeOnly DefaultBreakStart = new(12, 0);
     private static readonly TimeOnly DefaultBreakEnd = new(12, 30);
 
-    public EventToTimeSpanConverter(GitEventSource? gitEventSource = null)
+    public EventToTimeSpanConverter(GitEventSource? gitEventSource = null, AppConfiguration? appConfig = null)
     {
         _gitEventSource = gitEventSource;
+        _appConfig = appConfig;
     }
 
     /// <summary>
@@ -76,7 +81,7 @@ public class EventToTimeSpanConverter
                 {
                     var ticket = switchEvent.Metadata.TryGetValue("TicketNumber", out var t) ? t : _gitEventSource.ExtractTicketNumber(branchName);
                     branchHistory.Add((switchEvent.Timestamp, branchName, ticket));
-                    Log.Debug("Branch switch at {Time}: {Branch} (Ticket: {Ticket})", 
+                    Log.Debug("Branch switch at {Time}: {Branch} (Ticket: {Ticket})",
                         switchEvent.Timestamp, branchName, ticket ?? "none");
                 }
             }
@@ -89,7 +94,7 @@ public class EventToTimeSpanConverter
                 {
                     var ticket = _gitEventSource.ExtractTicketNumber(currentBranch);
                     branchHistory.Add((DateTime.MinValue, currentBranch, ticket));
-                    Log.Information("No branch switches found, using current branch: {Branch} (Ticket: {Ticket})", 
+                    Log.Information("No branch switches found, using current branch: {Branch} (Ticket: {Ticket})",
                         currentBranch, ticket ?? "none");
                 }
             }
@@ -148,10 +153,14 @@ public class EventToTimeSpanConverter
 
         var sortedEvents = events.OrderBy(e => e.Timestamp).ToList();
 
-        // Check for special whole-day events (Homeoffice or Holiday)
-        var specialEvent = sortedEvents.FirstOrDefault(e => 
-            e.EventType == "SpecialWholeDay-Homeoffice" || 
-            e.EventType == "SpecialWholeDay-Holiday");
+        // Check for Homeoffice day (handled differently - sets location on all slots)
+        var homeofficeEvent = sortedEvents.FirstOrDefault(e => e.EventType == "SpecialWholeDay-Homeoffice");
+        bool isHomeofficeDay = homeofficeEvent != null;
+
+        // Check for special whole-day events that override all slots (Holiday or Zeitausgleich)
+        var specialEvent = sortedEvents.FirstOrDefault(e =>
+            e.EventType == "SpecialWholeDay-Holiday" ||
+            e.EventType == "SpecialWholeDay-Zeitausgleich");
 
         if (specialEvent != null)
         {
@@ -183,7 +192,7 @@ public class EventToTimeSpanConverter
 
         // Work slots start after first slot
         var workStart = firstSlotEnd;
-        var workEnd = shutdownEvent != null 
+        var workEnd = shutdownEvent != null
             ? RoundDownToNearest(TimeOnly.FromDateTime(shutdownEvent.Timestamp), LastSlotRoundingMinutes)
             : new TimeOnly(17, 0); // Default to 5 PM if no shutdown
 
@@ -192,10 +201,10 @@ public class EventToTimeSpanConverter
 
         // Get all work-related events (commits) between work start and end
         var workEvents = sortedEvents
-            .Where(e => e.EventType != "Boot" && e.EventType != "Shutdown" 
+            .Where(e => e.EventType != "Boot" && e.EventType != "Shutdown"
                      && e.EventType != "CalendarMeetingStart" && e.EventType != "CalendarMeetingEnd"
                      && e.EventType != "ReviewStart" && e.EventType != "ReviewEnd")
-            .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= workStart && 
+            .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= workStart &&
                        TimeOnly.FromDateTime(e.Timestamp) <= workEnd)
             .ToList();
 
@@ -223,6 +232,24 @@ public class EventToTimeSpanConverter
         {
             // Have meetings - create granular slots
             CreateGranularSlotsWithMeetings(timeSlots, date, workStart, workEnd, workEvents, calendarMeetings, branchHistory);
+        }
+
+        // Apply location to all slots based on homeoffice day or default
+        var defaultLocation = _appConfig?.DefaultLocation ?? "WV";
+        var location = isHomeofficeDay ? "Home" : defaultLocation;
+
+        // Update timeslots with location
+        foreach (var slot in timeSlots)
+        {
+            if (string.IsNullOrEmpty(slot.Location))
+            {
+                slot.Location = location;
+            }
+        }
+
+        if (isHomeofficeDay)
+        {
+            Log.Information("Applied Home location to all {SlotCount} time slots for Homeoffice day", timeSlots.Count);
         }
 
         Log.Information("Converted {EventCount} events into {SlotCount} time slots", events.Count, timeSlots.Count);
@@ -265,8 +292,8 @@ public class EventToTimeSpanConverter
             // Match corresponding end event (CalendarMeetingEnd or ReviewEnd)
             var expectedEndType = startEvent.EventType == "ReviewStart" ? "ReviewEnd" : "CalendarMeetingEnd";
 
-            var endEvent = events.FirstOrDefault(e => 
-                e.EventType == expectedEndType && 
+            var endEvent = events.FirstOrDefault(e =>
+                e.EventType == expectedEndType &&
                 e.Description == startEvent.Description &&
                 e.Timestamp >= startEvent.Timestamp);
 
@@ -427,7 +454,7 @@ public class EventToTimeSpanConverter
             return null;
 
         var eventsInWindow = workEvents
-            .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= BreakWindowStart && 
+            .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= BreakWindowStart &&
                        TimeOnly.FromDateTime(e.Timestamp) <= BreakWindowEnd)
             .OrderBy(e => e.Timestamp)
             .ToList();
@@ -480,7 +507,7 @@ public class EventToTimeSpanConverter
                 if (currentTime < lunchBreak.Value.Start)
                 {
                     var eventsBeforeLunch = workEvents
-                        .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime && 
+                        .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime &&
                                    TimeOnly.FromDateTime(e.Timestamp) < lunchBreak.Value.Start)
                         .ToList();
 
@@ -505,7 +532,7 @@ public class EventToTimeSpanConverter
             if (currentTime < meeting.Start)
             {
                 var eventsInPeriod = workEvents
-                    .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime && 
+                    .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime &&
                                TimeOnly.FromDateTime(e.Timestamp) < meeting.Start)
                     .ToList();
 
@@ -547,7 +574,7 @@ public class EventToTimeSpanConverter
             if (currentTime < lunchBreak.Value.Start)
             {
                 var eventsBeforeLunch = workEvents
-                    .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime && 
+                    .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime &&
                                TimeOnly.FromDateTime(e.Timestamp) < lunchBreak.Value.Start)
                     .ToList();
 
@@ -572,7 +599,7 @@ public class EventToTimeSpanConverter
         if (currentTime < workEnd)
         {
             var eventsInPeriod = workEvents
-                .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime && 
+                .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime &&
                            TimeOnly.FromDateTime(e.Timestamp) <= workEnd)
                 .ToList();
 
@@ -628,7 +655,7 @@ public class EventToTimeSpanConverter
             // Check if gap meets break criteria (30-60 min)
             if (gapDuration >= MinBreakMinutes && gapDuration <= MaxBreakMinutes)
             {
-                Log.Information("Detected lunch break from meeting gap: {Start} - {End} ({Duration} min)", 
+                Log.Information("Detected lunch break from meeting gap: {Start} - {End} ({Duration} min)",
                     gapStart, gapEnd, gapDuration);
                 return (gapStart, gapEnd);
             }
@@ -643,7 +670,7 @@ public class EventToTimeSpanConverter
 
             if (gapDuration >= MinBreakMinutes && gapDuration <= MaxBreakMinutes)
             {
-                Log.Information("Detected lunch break before meetings: {Start} - {End} ({Duration} min)", 
+                Log.Information("Detected lunch break before meetings: {Start} - {End} ({Duration} min)",
                     gapStart, gapEnd, gapDuration);
                 return (gapStart, gapEnd);
             }
@@ -659,7 +686,7 @@ public class EventToTimeSpanConverter
 
             if (gapDuration >= MinBreakMinutes && gapDuration <= MaxBreakMinutes)
             {
-                Log.Information("Detected lunch break after meetings: {Start} - {End} ({Duration} min)", 
+                Log.Information("Detected lunch break after meetings: {Start} - {End} ({Duration} min)",
                     gapStart, gapEnd, gapDuration);
                 return (gapStart, gapEnd);
             }
@@ -772,36 +799,71 @@ public class EventToTimeSpanConverter
         TimeSlotCategory.TfsWork => "Edge Browser",
         TimeSlotCategory.Homeoffice => "Outlook",
         TimeSlotCategory.Holiday => "Outlook",
+        TimeSlotCategory.Zeitausgleich => "Outlook",
         TimeSlotCategory.Other => "Unknown",
         _ => "Unknown"
     };
 
     /// <summary>
-    /// Create a single special whole-day timeslot for Homeoffice or Holiday
+    /// Create a single special whole-day timeslot for Holiday or Zeitausgleich
     /// </summary>
     private IReadOnlyList<TimeSlot> CreateSpecialWholeDayTimeSlot(Event specialEvent)
     {
         var date = DateOnly.FromDateTime(specialEvent.Timestamp);
-        var category = specialEvent.EventType == "SpecialWholeDay-Homeoffice" 
-            ? TimeSlotCategory.Homeoffice 
-            : TimeSlotCategory.Holiday;
+        var category = specialEvent.EventType switch
+        {
+            "SpecialWholeDay-Holiday" => TimeSlotCategory.Holiday,
+            "SpecialWholeDay-Zeitausgleich" => TimeSlotCategory.Zeitausgleich,
+            _ => TimeSlotCategory.Other
+        };
 
-        var description = specialEvent.Description ?? (category == TimeSlotCategory.Homeoffice 
-            ? "Home Office" 
-            : "Holiday");
+        var description = specialEvent.Description ?? category switch
+        {
+            TimeSlotCategory.Holiday => "Holiday",
+            TimeSlotCategory.Zeitausgleich => "Zeitausgleich",
+            _ => "Special Day"
+        };
+
+        // Calculate start and end times based on category
+        TimeOnly startTime;
+        TimeOnly endTime;
+
+        if (category == TimeSlotCategory.Holiday)
+        {
+            // Holiday: configurable work hours (default 6.4h = 6h 24min)
+            startTime = new TimeOnly(8, 0);
+            var holidayHours = _appConfig?.WorkHours ?? 6.4;
+            var totalMinutes = (int)(holidayHours * 60);
+            var hours = totalMinutes / 60;
+            var minutes = totalMinutes % 60;
+            endTime = startTime.AddHours(hours).AddMinutes(minutes);
+        }
+        else if (category == TimeSlotCategory.Zeitausgleich)
+        {
+            // Zeitausgleich: 00:00 - 00:00 (no hours)
+            startTime = new TimeOnly(0, 0);
+            endTime = new TimeOnly(0, 0);
+        }
+        else
+        {
+            // Fallback
+            startTime = new TimeOnly(8, 0);
+            endTime = new TimeOnly(17, 0);
+        }
 
         var timeSlot = new TimeSlot
         {
             Date = date,
-            StartTime = new TimeOnly(8, 0),  // Start at 8:00 AM
-            EndTime = new TimeOnly(17, 0),   // End at 5:00 PM (9 hours)
+            StartTime = startTime,
+            EndTime = endTime,
             TicketNr = null,
             Text = description,
             Source = GetSourceFromCategory(category),
             Category = category
         };
 
-        Log.Information("Created special whole-day {Category} timeslot for {Date}", category, date);
+        Log.Information("Created special whole-day {Category} timeslot for {Date} ({Start} - {End})", 
+            category, date, startTime, endTime);
         return [timeSlot];
     }
 
@@ -821,7 +883,7 @@ public class EventToTimeSpanConverter
 
             if (!string.IsNullOrEmpty(ticket))
             {
-                Log.Debug("No ticket in {Count} events at {Time}, using branch ticket {Ticket}", 
+                Log.Debug("No ticket in {Count} events at {Time}, using branch ticket {Ticket}",
                     events.Count, slotTime, ticket);
             }
         }
@@ -841,7 +903,7 @@ public class EventToTimeSpanConverter
 
         // Filter out lunch break and other skeleton events - we only want actual work events
         var actualWorkEvents = workEvents
-            .Where(e => e.EventType != "Lunch Break Start" && 
+            .Where(e => e.EventType != "Lunch Break Start" &&
                        e.EventType != "Lunch Break End" &&
                        e.EventType != "Boot" &&
                        e.EventType != "Shutdown" &&
@@ -867,8 +929,8 @@ public class EventToTimeSpanConverter
 
         // Fall back to first actual work event's description
         var firstEvent = actualWorkEvents[0];
-        return !string.IsNullOrWhiteSpace(firstEvent.Description) 
-            ? firstEvent.Description 
+        return !string.IsNullOrWhiteSpace(firstEvent.Description)
+            ? firstEvent.Description
             : firstEvent.EventType;
     }
 }

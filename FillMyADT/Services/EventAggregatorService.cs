@@ -12,6 +12,8 @@ namespace FillMyADT.Services;
 /// </summary>
 public class EventAggregatorService
 {
+    private static readonly ILogger Log = Serilog.Log.ForContext<EventAggregatorService>();
+
     private readonly IEnumerable<IEventSource> _eventSources;
 
     public EventAggregatorService(IEnumerable<IEventSource> eventSources)
@@ -92,7 +94,7 @@ public class EventAggregatorService
         }
         catch (OperationCanceledException)
         {
-            Log.Warning("Event retrieval from {SourceName} was cancelled", source.Name);
+            Log.Information("Event retrieval from {SourceName} was cancelled", source.Name);
             return null;
         }
         catch (Exception ex)

@@ -1,19 +1,10 @@
-﻿using System.Text;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Navigation;
-using System.Windows.Shapes;
-using Microsoft.Extensions.DependencyInjection;
-using FillMyADT.Models;
+﻿using FillMyADT.Models;
 using FillMyADT.Models.Configuration;
 using FillMyADT.Services;
 using FillMyADT.Services.EventSources;
+using Microsoft.Extensions.DependencyInjection;
 using Serilog;
+using System.Windows;
 
 namespace FillMyADT
 {
@@ -69,7 +60,19 @@ namespace FillMyADT
                 Log.Warning(ex, "Failed to initialize default configuration");
             }
 
-            // Load configurations with fallback to defaults
+            // Load full application configuration
+            AppConfiguration appConfig;
+            try
+            {
+                appConfig = configService.LoadAllConfigsAsync().GetAwaiter().GetResult() ?? new AppConfiguration();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to load application config, using defaults");
+                appConfig = new AppConfiguration();
+            }
+
+            // Load individual event source configurations with fallback to defaults
             WindowsEventSourceConfig windowsConfig;
             GitEventSourceConfig gitConfig;
             OutlookEventSourceConfig outlookConfig;
@@ -124,20 +127,21 @@ namespace FillMyADT
             // Register event sources with configurations
             serviceCollection.AddSingleton<IEventSource>(sp => new WindowsEventSource(windowsConfig));
             serviceCollection.AddSingleton<IEventSource>(sp => new GitEventSource(gitConfig));
-            serviceCollection.AddSingleton<IEventSource>(sp => new OutlookEventSource(outlookConfig));
+            serviceCollection.AddSingleton<IEventSource>(sp => new OutlookEventSource(outlookConfig, appConfig));
             serviceCollection.AddSingleton<IEventSource>(sp => new EdgeEventSource(edgeConfig));
 
             // Register aggregator service
             serviceCollection.AddSingleton<EventAggregatorService>();
 
-            // Register converter service
-            serviceCollection.AddSingleton<EventToTimeSpanConverter>();
+            // Register converter service with app config for location handling
+            serviceCollection.AddSingleton(sp =>
+            {
+                var gitSource = sp.GetServices<IEventSource>().OfType<GitEventSource>().FirstOrDefault();
+                return new EventToTimeSpanConverter(gitSource, appConfig);
+            });
 
             // Register clipboard formatter
             serviceCollection.AddSingleton<ClipboardFormatterService>();
-
-            // Register notification service
-            serviceCollection.AddSingleton<NotificationService>();
 
             return serviceCollection.BuildServiceProvider();
         }

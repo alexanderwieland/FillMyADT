@@ -30,12 +30,12 @@ public static class LoggingService
             .Enrich.FromLogContext()
             .Enrich.WithProperty("Application", "FillMyADT")
             .WriteTo.Console(
-                outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
+                outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}")
             .WriteTo.File(
                 logFilePath,
                 rollingInterval: RollingInterval.Day,
                 retainedFileCountLimit: 30,
-                outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} {Level:u3}] {Message:lj} {Properties}{NewLine}{Exception}")
+                outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} {Level:u3}] [{SourceContext}] {Message:lj} {Properties}{NewLine}{Exception}")
             .CreateLogger();
 
         Log.Information("Logging initialized. Log directory: {LogDirectory}", logDirectory);
