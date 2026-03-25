@@ -104,6 +104,9 @@ public static class TimeSlotCategoryExtensions
          EventType.CalendarMeetingStart => TimeSlotCategory.Meeting,
          EventType.CalendarMeetingEnd => TimeSlotCategory.Meeting,
 
+         EventType.TicketStart => TimeSlotCategory.RedmineTickets,
+         EventType.TicketEnd => TimeSlotCategory.RedmineTickets,
+
          EventType.LunchBreakStart => TimeSlotCategory.Break,
          EventType.LunchBreakEnd => TimeSlotCategory.Break,
 

@@ -366,7 +366,7 @@ public class EdgeEventSource : IEventSource
         {
             Source = Name,
             Timestamp = roundedStartDateTime,
-            EventType = EventType.CalendarMeetingStart,
+            EventType = EventType.TicketStart,
             Description = description,
             Metadata = new Dictionary<string, string>(metadata)
             {
@@ -378,7 +378,7 @@ public class EdgeEventSource : IEventSource
         {
             Source = Name,
             Timestamp = roundedStartDateTime.AddMinutes(durationMinutes),
-            EventType = EventType.CalendarMeetingEnd,
+            EventType = EventType.TicketEnd,
             Description = description,
             Metadata = new Dictionary<string, string>(metadata)
         };

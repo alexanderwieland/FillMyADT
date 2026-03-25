@@ -189,6 +189,11 @@ public class AdtXmlExportService
             return "01-DEV-interneAbstimmungen";
         }
 
+        if (slot.Category == TimeSlotCategory.RedmineTickets)
+        {
+            return "#23755";
+        }
+
         // Use ticket number if available, otherwise default
         if (!string.IsNullOrEmpty(slot.TicketNr))
         {
@@ -233,6 +238,11 @@ public class AdtXmlExportService
         if (!string.IsNullOrEmpty(slot.TicketNr) && slot.Category == TimeSlotCategory.TfsWork)
         {
             return "Review";
+        }
+
+        if (slot.Category == TimeSlotCategory.RedmineTickets)
+        {
+            return "Ticketmanagement";
         }
 
         // Use slot text, truncate if too long

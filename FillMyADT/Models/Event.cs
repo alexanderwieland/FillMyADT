@@ -51,5 +51,7 @@ public enum EventType
     ReviewEnd,
     None,
     BranchSwitch,
-    Commit
+    Commit,
+    TicketEnd,
+    TicketStart
 }

@@ -202,6 +202,7 @@ public class EventToTimeSpanConverter
         var workEvents = sortedEvents
             .Where(e => e.EventType != EventType.Boot && e.EventType != EventType.Shutdown
                      && e.EventType != EventType.CalendarMeetingStart && e.EventType != EventType.CalendarMeetingEnd
+                     && e.EventType != EventType.TicketStart && e.EventType != EventType.TicketEnd
                      && e.EventType != EventType.ReviewStart && e.EventType != EventType.ReviewEnd)
             .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= workStart &&
                        TimeOnly.FromDateTime(e.Timestamp) <= workEnd)
@@ -260,7 +261,7 @@ public class EventToTimeSpanConverter
     private List<CalendarMeeting> ExtractCalendarMeetings(List<Event> events, TimeOnly workStart, TimeOnly workEnd)
     {
         var meetingStarts = events
-            .Where(e => e.EventType == EventType.CalendarMeetingStart || e.EventType == EventType.ReviewStart)
+            .Where(e => e.EventType == EventType.CalendarMeetingStart || e.EventType == EventType.ReviewStart || e.EventType == EventType.TicketStart)
             .Where(e => TimeOnly.FromDateTime(e.Timestamp) < workEnd)
             .ToList();
 
@@ -285,8 +286,10 @@ public class EventToTimeSpanConverter
 
         foreach (var startEvent in meetingStarts)
         {
-            // Match corresponding end event (CalendarMeetingEnd or ReviewEnd)
-            var expectedEndType = startEvent.EventType == EventType.ReviewStart ? EventType.ReviewEnd : EventType.CalendarMeetingEnd;
+            // Match corresponding end event (CalendarMeetingEnd, ReviewEnd, or TicketEnd)
+            var expectedEndType = startEvent.EventType == EventType.ReviewStart ? EventType.ReviewEnd :
+                                  startEvent.EventType == EventType.TicketStart ? EventType.TicketEnd :
+                                  EventType.CalendarMeetingEnd;
 
             var endEvent = events.FirstOrDefault(e =>
                 e.EventType == expectedEndType &&
@@ -882,7 +885,9 @@ public class EventToTimeSpanConverter
                        e.EventType != EventType.Boot &&
                        e.EventType != EventType.Shutdown &&
                        e.EventType != EventType.CalendarMeetingStart &&
-                       e.EventType != EventType.CalendarMeetingEnd)
+                       e.EventType != EventType.CalendarMeetingEnd &&
+                       e.EventType != EventType.TicketStart &&
+                       e.EventType != EventType.TicketEnd)
             .ToList();
 
         if (actualWorkEvents.Count == 0)
