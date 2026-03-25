@@ -4,6 +4,6 @@
              xmlns:local="clr-namespace:FillMyADT"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-         
+
     </Application.Resources>
 </Application>

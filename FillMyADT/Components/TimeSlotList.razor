@@ -36,9 +36,21 @@ else
                             {
                                 <div class="source-badge source-@slot.Source.ToLowerInvariant().Replace(" ", "-")">@slot.Source</div>
                             }
-                            @if (!string.IsNullOrEmpty(slot.TicketNr))
+                            @* Show ticket badge for Git timeslots - always display to highlight missing tickets *@
+                            @if (slot.Source == "Git")
                             {
-                                <div class="ticket-badge">@slot.TicketNr</div>
+                                @if (!string.IsNullOrEmpty(slot.TicketNr))
+                                {
+                                    <div class="ticket-badge">#@slot.TicketNr.TrimStart('#')</div>
+                                }
+                                else
+                                {
+                                    <div class="ticket-badge ticket-missing">⚠️ No Ticket</div>
+                                }
+                            }
+                            else if (!string.IsNullOrEmpty(slot.TicketNr))
+                            {
+                                <div class="ticket-badge">#@slot.TicketNr.TrimStart('#')</div>
                             }
                             <div class="timeslot-text">@slot.Text</div>
                         </div>
@@ -258,6 +270,32 @@ else
         padding: 3px 8px;
         border-radius: 3px;
         display: inline-block;
+    }
+
+    .ticket-badge.ticket-missing {
+        background-color: #dc3545; /* Red background for missing tickets */
+        color: #fff;
+        font-weight: 600;
+        font-size: 11px;
+        padding: 3px 8px;
+        border-radius: 3px;
+        display: inline-block;
+        animation: pulse 2s ease-in-out infinite;
+    }
+
+    .repo-badge {
+        background-color: #6c757d; /* Gray background for repository */
+        color: #fff;
+        font-weight: 600;
+        font-size: 11px;
+        padding: 3px 8px;
+        border-radius: 3px;
+        display: inline-block;
+    }
+
+    @@keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
     }
 
     .timeslot-text {

@@ -20,6 +20,27 @@ public class AdtXmlExportService
     }
 
     /// <summary>
+    /// Get export preview without writing to file
+    /// </summary>
+    public IReadOnlyList<AdtExportEntry> GetExportPreview(IReadOnlyList<TimeSlot> timeSlots, DateTime date)
+    {
+        ArgumentNullException.ThrowIfNull(timeSlots);
+
+        var exportEntries = new List<AdtExportEntry>();
+
+        foreach (var slot in timeSlots)
+        {
+            if (slot.Category == TimeSlotCategory.Break)
+                continue; // Skip breaks
+
+            var entry = CreateExportEntry(slot, date);
+            exportEntries.Add(entry);
+        }
+
+        return exportEntries;
+    }
+
+    /// <summary>
     /// Export time slots to ADT XML format
     /// </summary>
     public async Task<string> ExportToXmlAsync(IReadOnlyList<TimeSlot> timeSlots, DateTime date, CancellationToken cancellationToken = default)
@@ -79,39 +100,47 @@ public class AdtXmlExportService
     }
 
     /// <summary>
+    /// Create export entry from time slot
+    /// </summary>
+    private AdtExportEntry CreateExportEntry(TimeSlot slot, DateTime date)
+    {
+        var durationHours = slot.Duration.TotalHours;
+
+        return new AdtExportEntry
+        {
+            TimeSlot = slot,
+            BA = _appConfig.Initials,
+            Datum = date,
+            Beginn = slot.StartTime.ToString("HH:mm"),
+            Ende = slot.EndTime.ToString("HH:mm"),
+            Dauer = durationHours,
+            Ort = GetOrt(slot),
+            Betrieb = GetBetrieb(slot),
+            Projekt = GetProjekt(slot),
+            Dokumentation = GetDokumentation(slot),
+            Bereich = GetBereich(slot)
+        };
+    }
+
+    /// <summary>
     /// Create ADoffen element for a single time slot
     /// </summary>
     private XElement CreateAdoffenElement(TimeSlot slot, DateTime date)
     {
-        var durationHours = slot.Duration.TotalHours;
-
-        // Get location (use ABW for special categories)
-        var ort = GetOrt(slot);
-
-        // Get Betrieb (company/operation) - DEFAULT LOGIC, ADAPT AS NEEDED
-        var betrieb = GetBetrieb(slot);
-
-        // Get Projekt (project) - DEFAULT LOGIC, ADAPT AS NEEDED
-        var projekt = GetProjekt(slot);
-
-        // Get Dokumentation (documentation) - DEFAULT LOGIC, ADAPT AS NEEDED
-        var dokumentation = GetDokumentation(slot);
-
-        // Get Bereich (area/department) - DEFAULT LOGIC, ADAPT AS NEEDED
-        var bereich = GetBereich(slot);
+        var entry = CreateExportEntry(slot, date);
 
         return new XElement("ADoffen",
-            new XElement("BA", _appConfig.Initials),
-            new XElement("Datum", date.ToString("yyyy-MM-ddTHH:mm:sszzz")),
-            new XElement("Beginn", slot.StartTime.ToString("HH:mm")),
-            new XElement("Ende", slot.EndTime.ToString("HH:mm")),
-            new XElement("Dauer", durationHours.ToString("F2").Replace(',', '.')),
-            new XElement("DauerWV", durationHours.ToString("F2").Replace(',', '.')),
-            new XElement("Ort", ort),
-            new XElement("Betrieb", betrieb),
-            new XElement("Projekt", projekt),
-            new XElement("Dokumentation", dokumentation),
-            new XElement("Bereich", bereich)
+            new XElement("BA", entry.BA),
+            new XElement("Datum", entry.Datum.ToString("yyyy-MM-ddTHH:mm:sszzz")),
+            new XElement("Beginn", entry.Beginn),
+            new XElement("Ende", entry.Ende),
+            new XElement("Dauer", entry.Dauer.ToString("F2").Replace(',', '.')),
+            new XElement("DauerWV", entry.Dauer.ToString("F2").Replace(',', '.')),
+            new XElement("Ort", entry.Ort),
+            new XElement("Betrieb", entry.Betrieb),
+            new XElement("Projekt", entry.Projekt),
+            new XElement("Dokumentation", entry.Dokumentation),
+            new XElement("Bereich", entry.Bereich)
         );
     }
 
@@ -151,6 +180,8 @@ public class AdtXmlExportService
 
         if (slot.Category == TimeSlotCategory.RedmineTickets || slot.Category == TimeSlotCategory.TfsWork || slot.Category == TimeSlotCategory.Work)
         {
+            if (string.IsNullOrEmpty(slot.TicketNr))
+                return "MIW";
             return "INFG"; // TODO Check Text for Betrieb Name
         }
 
@@ -199,8 +230,12 @@ public class AdtXmlExportService
         {
             return $"{slot.TicketNr}";
         }
+        else         if (slot.Category == TimeSlotCategory.Work)
+        {
+            return "MIMWART";
+        }
 
-        return "02-ORGA-Divers"; // Default project
+            return "02-ORGA-Divers"; // Default project
     }
 
     /// <summary>
@@ -242,7 +277,9 @@ public class AdtXmlExportService
 
         if (slot.Category == TimeSlotCategory.RedmineTickets)
         {
-            return "Ticketmanagement";
+            return !string.IsNullOrEmpty(slot.TicketNr)
+                ? $"Ticketmanagement {slot.TicketNr}"
+                : "Ticketmanagement";
         }
 
         // Use slot text, truncate if too long

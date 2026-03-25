@@ -1,4 +1,3 @@
 <Solution>
-  <Project Path="FillMyADT.Tests/FillMyADT.Tests.csproj" />
   <Project Path="FillMyADT/FillMyADT.csproj" />
 </Solution>

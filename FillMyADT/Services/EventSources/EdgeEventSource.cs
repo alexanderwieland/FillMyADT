@@ -4,7 +4,6 @@ using FillMyADT.Services.BrowserHistory;
 using Serilog;
 using System.Diagnostics;
 using System.IO;
-using System.Text.RegularExpressions;
 
 namespace FillMyADT.Services.EventSources;
 
@@ -16,7 +15,6 @@ public class EdgeEventSource : IEventSource
     private static readonly ILogger Log = Serilog.Log.ForContext<EdgeEventSource>();
 
     private readonly EdgeEventSourceConfig _config;
-    private readonly List<CompiledTicketPattern> _compiledPatterns;
 
     public string Name => "Edge Browser";
 
@@ -24,16 +22,7 @@ public class EdgeEventSource : IEventSource
     {
         ArgumentNullException.ThrowIfNull(config);
         _config = config;
-
-        // Compile regex patterns for performance
-        _compiledPatterns = _config.TicketPatterns
-            .Select(p => new CompiledTicketPattern(
-                p.Name,
-                new Regex(p.UrlPattern, RegexOptions.Compiled | RegexOptions.IgnoreCase),
-                p.TicketFormat))
-            .ToList();
-
-        Log.Information("EdgeEventSource initialized with {PatternCount} ticket patterns", _compiledPatterns.Count);
+        Log.Information("EdgeEventSource initialized");
     }
 
     public async Task<IEnumerable<Event>> GetEventsAsync(
@@ -138,8 +127,8 @@ public class EdgeEventSource : IEventSource
             .Select(v =>
             {
                 var source = DetermineTicketSource(v.Url);
-                var titleTicket = v.Title != null ? ExtractTicketFromTitle(v.Title) : null;
-                var urlTicket = ExtractTicketNumberFromUrl(v.Url);
+                var titleTicket = v.Title != null ? TicketParser.FromBrowserTitle(v.Title) : null;
+                var urlTicket = TicketParser.FromBrowserUrl(v.Url);
 
                 return new VisitWithTicket
                 {
@@ -235,20 +224,17 @@ public class EdgeEventSource : IEventSource
         if (tfsVisits.Count == 0)
             return events;
 
-        // Group by date and URL-based ticket (for consistency across different page titles)
+        // Group by date and ticket number from page title (TFS URL numbers are not ticket numbers)
         var ticketGroups = tfsVisits
-            .GroupBy(v => new { Date = v.Visit.VisitTime.Date, GroupingTicket = v.UrlBasedTicket! })
+            .GroupBy(v => new { Date = v.Visit.VisitTime.Date, GroupingTicket = v.TitleBasedTicket! })
             .ToList();
 
         foreach (var ticketGroup in ticketGroups)
         {
             var visitsForTicket = ticketGroup.ToList();
 
-            // Prefer work item number (#xxxxx) from title if available, otherwise use URL-based ticket (PR-xxx)
-            var displayTicket = visitsForTicket
-                .Select(v => v.TitleBasedTicket)
-                .Where(t => !string.IsNullOrEmpty(t))
-                .FirstOrDefault() ?? ticketGroup.Key.GroupingTicket;
+            // All TFS visits in this group are keyed on TitleBasedTicket
+            var displayTicket = ticketGroup.Key.GroupingTicket;
 
             // Get ordered visits for this ticket
             var orderedVisits = visitsForTicket.OrderBy(v => v.Visit.VisitTime).ToList();
@@ -338,7 +324,7 @@ public class EdgeEventSource : IEventSource
         List<string> urls,
         string halfDay)
     {
-        var ticketList = string.Join(", ", tickets.OrderBy(t => t));
+        var ticketList = string.Join(", ", tickets.OrderBy(t => t).Select(t => t.StartsWith('#') ? t : $"#{t}"));
         var description = $"Redmine Tickets ({tickets.Count} tickets)";
 
         var metadata = new Dictionary<string, string>
@@ -398,8 +384,8 @@ public class EdgeEventSource : IEventSource
 
         // Use title if available, otherwise use ticket number
         var description = _config.IncludePageTitle && !string.IsNullOrWhiteSpace(title)
-            ? $"{ticketNumber}: {title}"
-            : ticketNumber;
+            ? $"#{ticketNumber}: {title}"
+            : $"#{ticketNumber}";
 
         // Round times to nearest 15 minutes
         var startTime = TimeOnly.FromDateTime(firstVisit.VisitTime);
@@ -477,46 +463,6 @@ public class EdgeEventSource : IEventSource
         return TicketSource.Unknown;
     }
 
-    /// <summary>
-    /// Extract ticket number from page title (only #XXXXX format is valid)
-    /// </summary>
-    private static string? ExtractTicketFromTitle(string title)
-    {
-        if (string.IsNullOrWhiteSpace(title))
-            return null;
-
-        // Only look for work item pattern: #12345
-        var workItemMatch = Regex.Match(title, @"(#\d+)");
-        if (workItemMatch.Success)
-        {
-            return workItemMatch.Groups[1].Value;
-        }
-
-        // No valid ticket format found
-        return null;
-    }
-
-    /// <summary>
-    /// Extract ticket number from URL only (for consistent grouping)
-    /// </summary>
-    private string? ExtractTicketNumberFromUrl(string url)
-    {
-        foreach (var pattern in _compiledPatterns)
-        {
-            var match = pattern.Regex.Match(url);
-            if (match.Success)
-            {
-                var ticket = pattern.TicketFormat;
-                for (int i = 1; i < match.Groups.Count; i++)
-                {
-                    ticket = ticket.Replace($"${i}", match.Groups[i].Value);
-                }
-                return ticket;
-            }
-        }
-        return null;
-    }
-
     private static string ExtractDomain(string url)
     {
         try
@@ -545,8 +491,6 @@ public class EdgeEventSource : IEventSource
 
         return new TimeOnly(roundedMinutes / 60, roundedMinutes % 60);
     }
-
-    private record CompiledTicketPattern(string Name, Regex Regex, string TicketFormat);
 
     private enum TicketSource
     {

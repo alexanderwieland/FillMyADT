@@ -15,14 +15,24 @@ public class GitEventSource : IEventSource
     private static readonly ILogger Log = Serilog.Log.ForContext<GitEventSource>();
 
     private readonly GitEventSourceConfig _config;
-    private readonly List<string> _repositoryPaths;
-    private static readonly Regex _reflogPattern = new(@"(?<ref>[^\s]+)\s+HEAD@{[^}]+}:\s+(?<action>.+?):\s+(?<date>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", RegexOptions.Compiled);
-    private readonly Regex _ticketPattern;
+    private readonly IReadOnlyList<string> _repositoryPaths;
+
+    /// <summary>
+    /// The primary repository used for branch lookups (DefaultRepositoryPath if set, else first discovered repo).
+    /// </summary>
+    private readonly string? _defaultRepositoryPath;
+    // Simplified regex to extract date from HEAD@{date} format
+    private static readonly Regex _reflogDatePattern = new(@"HEAD@\{(.+?)\}", RegexOptions.Compiled);
+    private static readonly Regex _branchHeadPattern = new(@"HEAD -> ([^,]+)", RegexOptions.Compiled);
+    private static readonly Regex _checkoutPattern = new(@"checkout:\s+moving from .+ to (.+)", RegexOptions.Compiled);
 
     // Performance constants
     private const int MaxCommitsPerRepo = 50;   // Limit commits per repo (reduced from 100)
     private const int MaxReflogEntries = 20;     // Limit reflog entries (reduced from 50)
     private const int GitCommandTimeoutSeconds = 5;  // Timeout for git commands (reduced from 10)
+
+    private const string DefaultCommitDescription = "Umsetzung";
+    private const string GitDateFormat = "yyyy-MM-dd HH:mm:ss";
 
     public string Name => "Git History";
 
@@ -30,36 +40,45 @@ public class GitEventSource : IEventSource
     {
         ArgumentNullException.ThrowIfNull(config);
         _config = config;
-        _ticketPattern = new Regex(_config.TicketPattern, RegexOptions.Compiled);
 
-        _repositoryPaths = [];
+        var paths = new List<string>();
 
         if (config.RepositoryPaths.Count > 0)
-        {
-            _repositoryPaths.AddRange(config.RepositoryPaths);
-        }
+            paths.AddRange(config.RepositoryPaths);
 
         if (config.AutoDiscoverRepositories)
         {
             if (!string.IsNullOrWhiteSpace(config.ScanDirectory))
             {
-                var discovered = FindGitRepositories(config.ScanDirectory);
-                foreach (var repo in discovered)
+                foreach (var repo in FindGitRepositories(config.ScanDirectory))
                 {
-                    if (!_repositoryPaths.Contains(repo))
-                    {
-                        _repositoryPaths.Add(repo);
-                    }
+                    if (!paths.Contains(repo))
+                        paths.Add(repo);
                 }
             }
             else
             {
                 var discovered = FindGitRepository();
-                if (discovered != null && !_repositoryPaths.Contains(discovered))
-                {
-                    _repositoryPaths.Add(discovered);
-                }
+                if (discovered != null && !paths.Contains(discovered))
+                    paths.Add(discovered);
             }
+        }
+
+        _repositoryPaths = paths;
+
+        // Resolve the default/primary repository for branch lookups
+        if (!string.IsNullOrWhiteSpace(config.DefaultRepositoryPath) && Directory.Exists(config.DefaultRepositoryPath))
+        {
+            _defaultRepositoryPath = config.DefaultRepositoryPath;
+            Log.Information("GitEventSource: default repository for branch lookups is {Path}", _defaultRepositoryPath);
+
+            // Make sure the default repo is also scanned for events
+            if (!paths.Contains(_defaultRepositoryPath))
+                paths.Add(_defaultRepositoryPath);
+        }
+        else
+        {
+            _defaultRepositoryPath = paths.Count > 0 ? paths[0] : null;
         }
 
         if (_repositoryPaths.Count == 0)
@@ -114,8 +133,7 @@ public class GitEventSource : IEventSource
             try
             {
                 var events = await GetEventsFromRepositoryAsync(repoPath, startDate, endDate, cancellationToken);
-                var eventList = events.ToList();
-                allEvents.AddRange(eventList);
+                allEvents.AddRange(events);
             }
             catch (Exception ex)
             {
@@ -136,31 +154,12 @@ public class GitEventSource : IEventSource
         var repoName = Path.GetFileName(repoPath);
         var sw = Stopwatch.StartNew();
 
-        // Use Task.WhenAll to run commits and reflog queries in parallel (if both enabled)
-        if (_config.IncludeCommits && _config.IncludeBranchSwitches)
-        {
-            var commitTask = GetCommitsAsync(repoPath, startDate, endDate, cancellationToken);
-            var reflogTask = GetReflogEventsAsync(repoPath, startDate, endDate, cancellationToken);
+        var tasks = new List<Task<IEnumerable<Event>>>();
+        if (_config.IncludeCommits) tasks.Add(GetCommitsAsync(repoPath, startDate, endDate, cancellationToken));
+        if (_config.IncludeBranchSwitches) tasks.Add(GetReflogEventsAsync(repoPath, startDate, endDate, cancellationToken));
 
-            await Task.WhenAll(commitTask, reflogTask);
-
-            events.AddRange(await commitTask);
-            events.AddRange(await reflogTask);
-        }
-        else
-        {
-            if (_config.IncludeCommits)
-            {
-                var commits = await GetCommitsAsync(repoPath, startDate, endDate, cancellationToken);
-                events.AddRange(commits);
-            }
-
-            if (_config.IncludeBranchSwitches)
-            {
-                var reflogEvents = await GetReflogEventsAsync(repoPath, startDate, endDate, cancellationToken);
-                events.AddRange(reflogEvents);
-            }
-        }
+        foreach (var result in await Task.WhenAll(tasks))
+            events.AddRange(result);
 
         sw.Stop();
         Log.Debug("GitEventSource: {RepoName} processed in {ElapsedMs}ms ({EventCount} events)",
@@ -176,8 +175,8 @@ public class GitEventSource : IEventSource
 
         try
         {
-            var sinceArg = startDate.ToString("yyyy-MM-dd HH:mm:ss");
-            var untilArg = endDate.ToString("yyyy-MM-dd HH:mm:ss");
+            var sinceArg = startDate.ToString(GitDateFormat);
+            var untilArg = endDate.ToString(GitDateFormat);
 
             // OPTIMIZATION: Use HEAD instead of --all for faster queries
             var branchesArg = _config.IncludeBranches.Count > 0
@@ -223,10 +222,10 @@ public class GitEventSource : IEventSource
                         ["Repository"] = repoName
                     };
 
-                    var ticketNumber = ExtractTicketNumber(commitMessage);
+                    var ticketNumber = TicketParser.FromGitText(commitMessage);
                     if (string.IsNullOrEmpty(ticketNumber) && !string.IsNullOrWhiteSpace(branchRefs))
                     {
-                        ticketNumber = ExtractTicketNumber(branchRefs);
+                        ticketNumber = TicketParser.FromGitText(branchRefs);
                     }
 
                     if (!string.IsNullOrEmpty(ticketNumber))
@@ -243,7 +242,7 @@ public class GitEventSource : IEventSource
                         }
                     }
 
-                    var displayMessage = commitMessage.Length < 7 ? "Umsetzung" : commitMessage;
+                    var displayMessage = commitMessage.Length < 7 ? DefaultCommitDescription : commitMessage;
 
                     events.Add(new Event
                     {
@@ -271,10 +270,11 @@ public class GitEventSource : IEventSource
 
         try
         {
-            // CRITICAL OPTIMIZATION: Add limit to reflog command to prevent fetching thousands of entries
+            // OPTIMIZATION: Use structured format for easier parsing
+            // Format: hash|HEAD@{date}|action
             var output = await RunGitCommandAsync(
                 repoPath,
-                $"reflog --date=iso -n {MaxReflogEntries}",
+                $"reflog --format='%H|%gd|%gs' --date=iso -n {MaxReflogEntries}",
                 cancellationToken);
 
             if (string.IsNullOrWhiteSpace(output))
@@ -284,46 +284,19 @@ public class GitEventSource : IEventSource
 
             foreach (var line in lines)
             {
-                var match = _reflogPattern.Match(line);
-                if (match.Success && DateTime.TryParse(match.Groups["date"].Value, out var timestamp))
-                {
-                    // OPTIMIZATION: Break early if we're past the date range (reflog is chronological)
-                    if (timestamp < startDate)
-                        break;
+                if (!TryParseReflogLine(line, out var parsed))
+                    continue;
 
-                    if (timestamp >= startDate && timestamp <= endDate)
-                    {
-                        var action = match.Groups["action"].Value;
-                        if (action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
-                        {
-                            var metadata = new Dictionary<string, string>
-                            {
-                                ["Repository"] = repoName
-                            };
+                // Break early if we're past the date range (reflog is newest-first)
+                if (parsed.Timestamp < startDate)
+                    break;
 
-                            var ticketNumber = ExtractTicketNumber(action);
-                            if (!string.IsNullOrEmpty(ticketNumber))
-                            {
-                                metadata["TicketNumber"] = ticketNumber;
-                            }
+                if (parsed.Timestamp > endDate)
+                    continue;
 
-                            var branchName = ExtractBranchNameFromCheckout(action);
-                            if (!string.IsNullOrEmpty(branchName))
-                            {
-                                metadata["Branch"] = branchName;
-                            }
-
-                            events.Add(new Event
-                            {
-                                Source = $"{Name} - {repoName}",
-                                Timestamp = timestamp,
-                                EventType = EventType.BranchSwitch,
-                                Description = action,
-                                Metadata = metadata
-                            });
-                        }
-                    }
-                }
+                var reflogEvent = await DispatchReflogEntryAsync(parsed.Hash, parsed.Action, parsed.Timestamp, repoPath, repoName, cancellationToken);
+                if (reflogEvent != null)
+                    events.Add(reflogEvent);
             }
         }
         catch (Exception ex)
@@ -394,7 +367,6 @@ public class GitEventSource : IEventSource
                     return true;
                 }
             }
-            var repoNames = _repositoryPaths.Select(p => System.IO.Path.GetFileName(p));
             Log.Warning("GitEventSource not available: none of the {Count} repositories are valid Git repos", _repositoryPaths.Count);
             return false;
         }
@@ -411,11 +383,11 @@ public class GitEventSource : IEventSource
 
         while (!string.IsNullOrEmpty(currentDir))
         {
-            var gitDir = System.IO.Path.Combine(currentDir, ".git");
-            if (System.IO.Directory.Exists(gitDir))
+            var gitDir = Path.Combine(currentDir, ".git");
+            if (Directory.Exists(gitDir))
                 return currentDir;
 
-            var parent = System.IO.Directory.GetParent(currentDir);
+            var parent = Directory.GetParent(currentDir);
             currentDir = parent?.FullName ?? string.Empty;
         }
 
@@ -426,7 +398,7 @@ public class GitEventSource : IEventSource
     {
         var repositories = new List<string>();
 
-        if (!System.IO.Directory.Exists(scanDirectory))
+        if (!Directory.Exists(scanDirectory))
         {
             Log.Warning("Scan directory does not exist: {Path}", scanDirectory);
             return repositories;
@@ -434,12 +406,12 @@ public class GitEventSource : IEventSource
 
         try
         {
-            var directories = System.IO.Directory.GetDirectories(scanDirectory, "*", System.IO.SearchOption.TopDirectoryOnly);
+            var directories = Directory.GetDirectories(scanDirectory, "*", SearchOption.TopDirectoryOnly);
 
             foreach (var dir in directories)
             {
-                var gitDir = System.IO.Path.Combine(dir, ".git");
-                if (System.IO.Directory.Exists(gitDir))
+                var gitDir = Path.Combine(dir, ".git");
+                if (Directory.Exists(gitDir))
                 {
                     repositories.Add(dir);
                 }
@@ -479,8 +451,8 @@ public class GitEventSource : IEventSource
             }
 
             // OPTIMIZATION: Use HEAD instead of --all for faster activity check
-            var sinceArg = startDate.ToString("yyyy-MM-dd HH:mm:ss");
-            var untilArg = endDate.ToString("yyyy-MM-dd HH:mm:ss");
+            var sinceArg = startDate.ToString(GitDateFormat);
+            var untilArg = endDate.ToString(GitDateFormat);
 
             var output = await RunGitCommandAsync(
                 repoPath,
@@ -496,26 +468,12 @@ public class GitEventSource : IEventSource
         }
     }
 
-    internal string? ExtractTicketNumber(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-            return null;
-
-        var match = _ticketPattern.Match(text);
-        if (match.Success && match.Groups.Count > 1)
-        {
-            return match.Groups[1].Value;
-        }
-
-        return null;
-    }
-
     private static string? ExtractBranchName(string branchRefs)
     {
         if (string.IsNullOrWhiteSpace(branchRefs))
             return null;
 
-        var headMatch = Regex.Match(branchRefs, @"HEAD -> ([^,]+)");
+        var headMatch = _branchHeadPattern.Match(branchRefs);
         if (headMatch.Success)
         {
             return headMatch.Groups[1].Value.Trim();
@@ -530,7 +488,7 @@ public class GitEventSource : IEventSource
         if (string.IsNullOrWhiteSpace(action))
             return null;
 
-        var match = Regex.Match(action, @"checkout:\s+moving from .+ to (.+)");
+        var match = _checkoutPattern.Match(action);
         if (match.Success)
         {
             return match.Groups[1].Value.Trim();
@@ -539,17 +497,273 @@ public class GitEventSource : IEventSource
         return null;
     }
 
+    private readonly record struct ReflogEntry(string Hash, DateTime Timestamp, string Action);
+
+    private static bool TryParseReflogLine(string line, out ReflogEntry entry)
+    {
+        entry = default;
+        if (string.IsNullOrWhiteSpace(line)) return false;
+
+        var parts = line.Split('|');
+        if (parts.Length < 3) return false;
+
+        var dateMatch = _reflogDatePattern.Match(parts[1]);
+        if (!dateMatch.Success || !DateTime.TryParse(dateMatch.Groups[1].Value, out var timestamp)) return false;
+
+        entry = new ReflogEntry(parts[0], timestamp, parts[2]);
+        return true;
+    }
+
     /// <summary>
-    /// Get the current branch name for the primary repository
+    /// Dispatch a parsed reflog entry to the appropriate event factory
+    /// </summary>
+    private async Task<Event?> DispatchReflogEntryAsync(string commitHash, string action, DateTime timestamp, string repoPath, string repoName, CancellationToken cancellationToken)
+    {
+        if (action.Contains("rebase", StringComparison.OrdinalIgnoreCase))
+            return await HandleRebaseActionAsync(action, commitHash, timestamp, repoPath, repoName, cancellationToken);
+
+        if (action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
+            return CreateCheckoutEvent(action, timestamp, repoName);
+
+        if (action.StartsWith("commit", StringComparison.OrdinalIgnoreCase))
+            return await CreateCommitEventFromReflogAsync(repoPath, commitHash, action, timestamp, repoName, cancellationToken);
+
+        return null;
+    }
+
+    /// <summary>
+    /// Create a BranchSwitch event from a checkout action
+    /// </summary>
+    private Event? CreateCheckoutEvent(string action, DateTime timestamp, string repoName)
+    {
+        var metadata = new Dictionary<string, string>
+        {
+            ["Repository"] = repoName
+        };
+
+        // Extract the destination branch name first
+        var branchName = ExtractBranchNameFromCheckout(action);
+        if (!string.IsNullOrEmpty(branchName))
+        {
+            metadata["Branch"] = branchName;
+
+            // Extract ticket from the destination branch name, not from the entire action
+            // (action contains both source and destination, we only want destination)
+            var ticketNumber = TicketParser.FromGitText(branchName);
+            if (!string.IsNullOrEmpty(ticketNumber))
+            {
+                metadata["TicketNumber"] = ticketNumber;
+            }
+        }
+
+        return new Event
+        {
+            Source = $"{Name} - {repoName}",
+            Timestamp = timestamp,
+            EventType = EventType.BranchSwitch,
+            Description = action,
+            Metadata = metadata
+        };
+    }
+
+    // Matches "rebase (start): checkout <hash>"
+    private static readonly Regex _rebaseStartPattern =
+        new(@"rebase \(start\):\s+checkout\s+([0-9a-f]+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Matches "rebase (finish): returning to refs/heads/<branch>"
+    private static readonly Regex _rebaseFinishPattern =
+        new(@"rebase \(finish\):\s+returning to refs/heads/(.+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Handle rebase-related reflog actions.
+    /// Start: resolves the target commit hash to a subject and branch refs.
+    /// Finish: extracts the branch that was rebased.
+    /// All other rebase steps (pick, squash, amend, …) are skipped as noise.
+    /// </summary>
+    private async Task<Event?> HandleRebaseActionAsync(string action, string commitHash, DateTime timestamp, string repoPath, string repoName, CancellationToken cancellationToken)
+    {
+        var metadata = new Dictionary<string, string>
+        {
+            ["Repository"] = repoName,
+            ["RebaseAction"] = action
+        };
+
+        // rebase (start): checkout <hash>
+        var startMatch = _rebaseStartPattern.Match(action);
+        if (startMatch.Success)
+        {
+            var targetHash = startMatch.Groups[1].Value;
+            var shortHash = targetHash[..Math.Min(7, targetHash.Length)];
+
+            // Resolve hash ? subject + branch refs
+            string description;
+            try
+            {
+                var logOutput = await RunGitCommandAsync(
+                    repoPath,
+                    $"log -1 --format=%s|%D {targetHash}",
+                    cancellationToken);
+
+                if (!string.IsNullOrWhiteSpace(logOutput))
+                {
+                    var logParts = logOutput.Trim().Split('|');
+                    var subject = logParts[0].Trim();
+                    var refs = logParts.Length > 1 ? logParts[1].Trim() : string.Empty;
+
+                    var branchName = ExtractBranchName(refs);
+                    if (!string.IsNullOrEmpty(branchName))
+                    {
+                        metadata["Branch"] = branchName;
+                        var ticket = TicketParser.FromGitText(branchName);
+                        if (!string.IsNullOrEmpty(ticket))
+                            metadata["TicketNumber"] = ticket;
+                    }
+
+                    description = string.IsNullOrWhiteSpace(subject)
+                        ? $"Rebase started onto {shortHash}"
+                        : $"Rebase onto {shortHash}: {subject}";
+                }
+                else
+                {
+                    description = $"Rebase started onto {shortHash}";
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Could not resolve rebase target hash {Hash}", targetHash);
+                description = $"Rebase started onto {shortHash}";
+            }
+
+            return new Event
+            {
+                Source = $"{Name} - {repoName}",
+                Timestamp = timestamp,
+                EventType = EventType.BranchSwitch,
+                Description = description,
+                Metadata = metadata
+            };
+        }
+
+        // rebase (finish): returning to refs/heads/<branch>
+        var finishMatch = _rebaseFinishPattern.Match(action);
+        if (finishMatch.Success)
+        {
+            var branchName = finishMatch.Groups[1].Value.Trim();
+            metadata["Branch"] = branchName;
+
+            var ticket = TicketParser.FromGitText(branchName);
+            if (!string.IsNullOrEmpty(ticket))
+                metadata["TicketNumber"] = ticket;
+
+            return new Event
+            {
+                Source = $"{Name} - {repoName}",
+                Timestamp = timestamp,
+                EventType = EventType.BranchSwitch,
+                Description = $"Rebase finished: {branchName}",
+                Metadata = metadata
+            };
+        }
+
+        // All other mid-rebase steps (pick, squash, amend, …) are noise — skip them
+        Log.Debug("Skipping mid-rebase reflog entry: {Action}", action);
+        return null;
+    }
+
+    /// <summary>
+    /// Create a Commit event from reflog with branch information
+    /// </summary>
+    private async Task<Event?> CreateCommitEventFromReflogAsync(string repoPath, string commitHash, string action, DateTime timestamp, string repoName, CancellationToken cancellationToken)
+    {
+        var metadata = new Dictionary<string, string>
+        {
+            ["Repository"] = repoName,
+            ["CommitHash"] = commitHash
+        };
+
+        // Extract commit message from action (format: "commit: message" or "commit (amend): message")
+        var commitMessage = ExtractCommitMessage(action);
+        var ticketNumber = TicketParser.FromGitText(commitMessage);
+        if (!string.IsNullOrEmpty(ticketNumber))
+        {
+            metadata["TicketNumber"] = ticketNumber;
+        }
+
+        // Get branch name from the commit refs
+        try
+        {
+            var branchOutput = await RunGitCommandAsync(
+                repoPath,
+                $"log -1 --format='%D' {commitHash}",
+                cancellationToken);
+
+            if (!string.IsNullOrWhiteSpace(branchOutput))
+            {
+                var branchName = ExtractBranchName(branchOutput);
+                if (!string.IsNullOrEmpty(branchName))
+                {
+                    metadata["Branch"] = branchName;
+
+                    // If no ticket in commit message, try to extract from branch name
+                    if (string.IsNullOrEmpty(ticketNumber))
+                    {
+                        ticketNumber = TicketParser.FromGitText(branchName);
+                        if (!string.IsNullOrEmpty(ticketNumber))
+                        {
+                            metadata["TicketNumber"] = ticketNumber;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "Could not retrieve branch info for commit {Hash}", commitHash);
+        }
+
+        var displayMessage = string.IsNullOrWhiteSpace(commitMessage) || commitMessage.Length < 7
+            ? DefaultCommitDescription
+            : commitMessage;
+
+        return new Event
+        {
+            Source = $"{Name} - {repoName}",
+            Timestamp = timestamp,
+            EventType = EventType.Commit,
+            Description = displayMessage,
+            Metadata = metadata
+        };
+    }
+
+    /// <summary>
+    /// Extract commit message from reflog action line
+    /// </summary>
+    private static string ExtractCommitMessage(string action)
+    {
+        if (string.IsNullOrWhiteSpace(action))
+            return string.Empty;
+
+        // Format: "commit: message" or "commit (amend): message"
+        var colonIndex = action.IndexOf(':');
+        if (colonIndex > 0 && colonIndex < action.Length - 1)
+        {
+            return action.Substring(colonIndex + 1).Trim();
+        }
+
+        return action;
+    }
+
+    /// <summary>
+    /// Get the current branch name for the default/primary repository
     /// </summary>
     public async Task<string?> GetCurrentBranchAsync(CancellationToken cancellationToken = default)
     {
-        if (_repositoryPaths.Count == 0)
+        if (_defaultRepositoryPath == null)
             return null;
 
         try
         {
-            var output = await RunGitCommandAsync(_repositoryPaths[0], "rev-parse --abbrev-ref HEAD", cancellationToken);
+            var output = await RunGitCommandAsync(_defaultRepositoryPath, "rev-parse --abbrev-ref HEAD", cancellationToken);
             return string.IsNullOrWhiteSpace(output) ? null : output.Trim();
         }
         catch (Exception ex)
@@ -568,23 +782,26 @@ public class GitEventSource : IEventSource
         if (string.IsNullOrWhiteSpace(branchName))
             return null;
 
-        var ticketNumber = ExtractTicketNumber(branchName);
+        var ticketNumber = TicketParser.FromGitText(branchName);
         Log.Debug("Current branch: {Branch}, Ticket: {Ticket}", branchName, ticketNumber ?? "none");
         return ticketNumber;
     }
 
     /// <summary>
-    /// Get the branch that was active at a specific time by examining reflog history
+    /// Get the branch that was active at a specific time by examining the default repository's reflog history
     /// </summary>
     public async Task<string?> GetBranchAtTimeAsync(DateTime time, CancellationToken cancellationToken = default)
     {
-        if (_repositoryPaths.Count == 0)
+        if (_defaultRepositoryPath == null)
             return null;
 
         try
         {
-            // OPTIMIZATION: Limit reflog entries for historical queries
-            var output = await RunGitCommandAsync(_repositoryPaths[0], $"reflog --date=iso -n {MaxReflogEntries}", cancellationToken);
+            // OPTIMIZATION: Use structured format for easier parsing
+            var output = await RunGitCommandAsync(
+                _defaultRepositoryPath,
+                $"reflog --format='%H|%gd|%gs' --date=iso -n {MaxReflogEntries}",
+                cancellationToken);
 
             if (string.IsNullOrWhiteSpace(output))
                 return await GetCurrentBranchAsync(cancellationToken);
@@ -593,22 +810,16 @@ public class GitEventSource : IEventSource
 
             foreach (var line in lines)
             {
-                var match = _reflogPattern.Match(line);
-                if (match.Success && DateTime.TryParse(match.Groups["date"].Value, out var entryTime))
+                if (!TryParseReflogLine(line, out var parsed) || parsed.Timestamp > time)
+                    continue;
+
+                if (parsed.Action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (entryTime <= time)
+                    var branchName = ExtractBranchNameFromCheckout(parsed.Action);
+                    if (!string.IsNullOrEmpty(branchName))
                     {
-                        var action = match.Groups["action"].Value;
-                        if (action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
-                        {
-                            var branchName = ExtractBranchNameFromCheckout(action);
-                            if (!string.IsNullOrEmpty(branchName))
-                            {
-                                Log.Debug("Branch at {Time}: {Branch} (from reflog entry at {EntryTime})",
-                                    time, branchName, entryTime);
-                                return branchName;
-                            }
-                        }
+                        Log.Debug("Branch at {Time}: {Branch} (from reflog entry at {EntryTime})", time, branchName, parsed.Timestamp);
+                        return branchName;
                     }
                 }
             }
@@ -631,7 +842,7 @@ public class GitEventSource : IEventSource
         if (string.IsNullOrWhiteSpace(branchName))
             return null;
 
-        var ticketNumber = ExtractTicketNumber(branchName);
+        var ticketNumber = TicketParser.FromGitText(branchName);
         Log.Debug("Branch at {Time}: {Branch}, Ticket: {Ticket}", time, branchName, ticketNumber ?? "none");
         return ticketNumber;
     }

@@ -21,9 +21,32 @@ public record TimeSlot
     public required TimeOnly EndTime { get; init; }
 
     /// <summary>
-    /// Ticket number extracted from the event (if available) including #
+    /// Ticket number(s) extracted from the event (if available) including #
     /// </summary>
-    public string? TicketNr { get; init; }
+    public string? TicketNr
+    {
+        get;
+        init
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                field = value;
+                return;
+            }
+
+            if (!value.Contains(','))
+            {
+                field = value.StartsWith('#') ? value : $"#{value}";
+                return;
+            }
+
+            field = string.Join(", ", value
+                .Split(',')
+                .Select(t => t.Trim())
+                .Where(t => !string.IsNullOrEmpty(t))
+                .Select(t => t.StartsWith('#') ? t : $"#{t}"));
+        }
+    }
 
     /// <summary>
     /// Description/text for the time slot

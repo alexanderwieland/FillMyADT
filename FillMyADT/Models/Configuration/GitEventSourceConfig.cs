@@ -16,6 +16,13 @@ public record GitEventSourceConfig : EventSourceConfig
     }
 
     /// <summary>
+    /// Path to the default/primary Git repository used to resolve the active branch for a given day.
+    /// When set, filler time slots (gaps without Git events) get the ticket number from the branch
+    /// that was checked out in this repository on that day.
+    /// </summary>
+    public string? DefaultRepositoryPath { get; init; } = "MP2.Gast";
+
+    /// <summary>
     /// List of Git repository paths to monitor
     /// </summary>
     public List<string> RepositoryPaths { get; init; } = [];
@@ -39,11 +46,6 @@ public record GitEventSourceConfig : EventSourceConfig
     /// Use FETCH_HEAD file timestamp for quick activity check (faster than git log)
     /// </summary>
     public bool UseFetchHeadFilter { get; init; } = true;
-
-    /// <summary>
-    /// Regex pattern to extract ticket numbers from commits and branches (default: #\d+)
-    /// </summary>
-    public string TicketPattern { get; init; } = @"(#\d+)";
 
     /// <summary>
     /// Filter commits by author name (empty means all authors)

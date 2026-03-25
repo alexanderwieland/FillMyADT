@@ -68,29 +68,43 @@
         <button class="view-btn @(currentView == ViewMode.TimeSlots ? "active" : "")" @onclick="() => SwitchView(ViewMode.TimeSlots)">
             ⏱️ Time Slots
         </button>
+        <button class="view-btn @(currentView == ViewMode.ExportPreview ? "active" : "")" @onclick="() => SwitchView(ViewMode.ExportPreview)">
+            📤 Export Preview
+        </button>
     </div>
 
     @if (currentView == ViewMode.Events)
     {
         <EventList Events="@events" IsLoading="@isLoading" />
     }
-    else
+    else if (currentView == ViewMode.TimeSlots)
     {
         <TimeSlotList TimeSlots="@timeSlots" IsLoading="@isLoading" />
+    }
+    else
+    {
+        <AdtExportPreview
+            ExportEntries="@exportPreview"
+            IsLoading="@isLoading"
+            ExcludedCount="@excludedCount"
+            OnMergeAbove="@MergeWithAbove"
+            OnMergeBelow="@MergeWithBelow" />
     }
 </div>
 
 @code {
-    private enum ViewMode { Events, TimeSlots }
+    private enum ViewMode { Events, TimeSlots, ExportPreview }
 
     private DateTime selectedDate = DateTime.Today.AddDays(-1); // Start with yesterday
     private IReadOnlyList<Event>? events;
     private IReadOnlyList<TimeSlot>? timeSlots;
+    private IReadOnlyList<AdtExportEntry>? exportPreview;
+    private int excludedCount;
     private IEnumerable<string>? availableSources;
     private bool isLoading;
     private string? errorMessage;
     private CancellationTokenSource? _loadCancellationTokenSource;
-    private ViewMode currentView = ViewMode.TimeSlots;
+    private ViewMode currentView = ViewMode.ExportPreview;
 
     protected override async Task OnInitializedAsync()
     {
@@ -130,10 +144,16 @@
             if (events != null && events.Any())
             {
                 timeSlots = TimeSlotConverter.ConvertEventsToTimeSlots(events);
+
+                // Generate export preview
+                exportPreview = AdtExportService.GetExportPreview(timeSlots, selectedDate);
+                excludedCount = timeSlots.Count(ts => ts.Category == TimeSlotCategory.Break);
             }
             else
             {
                 timeSlots = Array.Empty<TimeSlot>();
+                exportPreview = Array.Empty<AdtExportEntry>();
+                excludedCount = 0;
             }
         }
         catch (OperationCanceledException)
@@ -145,6 +165,8 @@
             errorMessage = $"Error loading events: {ex.Message}";
             events = Array.Empty<Event>();
             timeSlots = Array.Empty<TimeSlot>();
+            exportPreview = Array.Empty<AdtExportEntry>();
+            excludedCount = 0;
         }
         finally
         {
@@ -293,6 +315,63 @@
         {
             Console.WriteLine($"Failed to export to ADT: {ex.Message}");
             errorMessage = $"Failed to export: {ex.Message}";
+        }
+    }
+
+    private void MergeWithAbove(AdtExportEntry entry)
+    {
+        if (timeSlots == null || exportPreview == null) return;
+
+        var currentIndex = exportPreview.ToList().IndexOf(entry);
+        if (currentIndex <= 0) return; // Can't merge with above if first item
+
+        var aboveEntry = exportPreview[currentIndex - 1];
+        MergeTimeSlots(aboveEntry.TimeSlot, entry.TimeSlot);
+    }
+
+    private void MergeWithBelow(AdtExportEntry entry)
+    {
+        if (timeSlots == null || exportPreview == null) return;
+
+        var currentIndex = exportPreview.ToList().IndexOf(entry);
+        if (currentIndex < 0 || currentIndex >= exportPreview.Count - 1) return; // Can't merge with below if last item
+
+        var belowEntry = exportPreview[currentIndex + 1];
+        MergeTimeSlots(entry.TimeSlot, belowEntry.TimeSlot);
+    }
+
+    private void MergeTimeSlots(TimeSlot first, TimeSlot second)
+    {
+        if (timeSlots == null) return;
+
+        // Create merged time slot
+        var merged = first with
+        {
+            EndTime = second.EndTime,
+            Text = string.IsNullOrEmpty(first.Text) ? second.Text : first.Text, // Keep first text if available
+            TicketNr = string.IsNullOrEmpty(first.TicketNr) ? second.TicketNr : first.TicketNr // Keep first ticket if available
+        };
+
+        // Rebuild timeSlots list with merged slot
+        var slotsList = timeSlots.ToList();
+        var firstIndex = slotsList.IndexOf(first);
+        var secondIndex = slotsList.IndexOf(second);
+
+        if (firstIndex >= 0 && secondIndex >= 0)
+        {
+            // Remove both original slots
+            slotsList.RemoveAt(Math.Max(firstIndex, secondIndex)); // Remove higher index first
+            slotsList.RemoveAt(Math.Min(firstIndex, secondIndex));
+
+            // Insert merged slot at the position of the first slot
+            slotsList.Insert(Math.Min(firstIndex, secondIndex), merged);
+
+            // Update timeSlots and regenerate export preview
+            timeSlots = slotsList;
+            exportPreview = AdtExportService.GetExportPreview(timeSlots, selectedDate);
+            excludedCount = timeSlots.Count(ts => ts.Category == TimeSlotCategory.Break);
+
+            StateHasChanged();
         }
     }
 

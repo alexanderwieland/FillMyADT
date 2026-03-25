@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:FillMyADT"
         xmlns:blazor="clr-namespace:Microsoft.AspNetCore.Components.WebView.Wpf;assembly=Microsoft.AspNetCore.Components.WebView.Wpf"
         mc:Ignorable="d"
-        Title="Blazor Hybrid App" Height="600" Width="900">
+        Title="Blazor Hybrid App" Height="900" Width="1400">
     <Grid>
         <blazor:BlazorWebView x:Name="blazorWebView" HostPage="wwwroot\index.html" Services="{StaticResource services}">
             <blazor:BlazorWebView.RootComponents>
