@@ -93,13 +93,26 @@ public class EventToTimeSpanConverter
                 var firstEventTime = events.Min(e => e.Timestamp);
                 var midDay = firstEventTime.Date.AddHours(12);
 
+                Log.Information("BuildBranchHistory: no branch switches in events for {Date}, querying default repo reflog at midday {MidDay}",
+                    firstEventTime.Date.ToShortDateString(), midDay);
+
                 var dayBranch = await _gitEventSource.GetBranchAtTimeAsync(midDay, cancellationToken);
                 if (!string.IsNullOrEmpty(dayBranch))
                 {
                     var ticket = TicketParser.FromGitText(dayBranch);
+
+                    // Branch name has no ticket (e.g. "aw/filter_rework_2") —
+                    // scan all commit/rebase messages on that day for one.
+                    if (string.IsNullOrEmpty(ticket))
+                    {
+                        Log.Information("BuildBranchHistory: branch '{Branch}' has no ticket in its name; scanning day reflog for ticket",
+                            dayBranch);
+                        ticket = await _gitEventSource.GetTicketFromDayReflogAsync(firstEventTime.Date, cancellationToken);
+                    }
+
                     branchHistory.Add((firstEventTime.Date, dayBranch, ticket));
-                    Log.Information("No branch switches found for {Date}; using branch active at midday: {Branch} (Ticket: {Ticket})",
-                        firstEventTime.Date.ToShortDateString(), dayBranch, ticket ?? "none");
+                    Log.Information("BuildBranchHistory: default branch for {Date} is '{Branch}', ticket: {Ticket}",
+                        firstEventTime.Date.ToShortDateString(), dayBranch, ticket ?? "(none)");
                 }
                 else
                 {
@@ -108,8 +121,13 @@ public class EventToTimeSpanConverter
                     {
                         var ticket = TicketParser.FromGitText(currentBranch);
                         branchHistory.Add((DateTime.MinValue, currentBranch, ticket));
-                        Log.Information("Could not resolve branch for that day; falling back to current branch: {Branch} (Ticket: {Ticket})",
-                            currentBranch, ticket ?? "none");
+                        Log.Warning("BuildBranchHistory: could not resolve branch for {Date} via reflog; using current branch '{Branch}', ticket: {Ticket}",
+                            firstEventTime.Date.ToShortDateString(), currentBranch, ticket ?? "(none)");
+                    }
+                    else
+                    {
+                        Log.Warning("BuildBranchHistory: no branch resolved at all for {Date} — filler slots will have no ticket",
+                            firstEventTime.Date.ToShortDateString());
                     }
                 }
             }
@@ -326,7 +344,12 @@ public class EventToTimeSpanConverter
                 continue;
 
             if (start < workStart)
+            {
+                // Shift the end forward by the same amount so the duration is preserved
+                var shift = workStart - start;
+                end = end.Add(shift);
                 start = workStart;
+            }
             if (end > workEnd)
                 end = workEnd;
 
@@ -341,10 +364,19 @@ public class EventToTimeSpanConverter
     }
 
     /// <summary>
+    /// Returns true for categories that represent browser-derived ticket slots (Redmine/TFS).
+    /// These are flexible and must yield to fixed Outlook calendar meetings.
+    /// </summary>
+    private static bool IsFlexibleTicketSlot(TimeSlotCategory category) =>
+        category is TimeSlotCategory.RedmineTickets or TimeSlotCategory.TfsWork;
+
+    /// <summary>
     /// Resolve overlapping meetings. Meeting start/end times are never modified.
     /// When a break overlaps a regular meeting, the break's start is shifted forward (after the
     /// meeting ends) or backward (before the next meeting starts) so it always occupies exactly
     /// MinBreakMinutes. Regular meetings that overlap each other have their start pushed forward.
+    /// Flexible ticket slots (Redmine/TFS) are truncated when they overlap a fixed Outlook meeting,
+    /// never the other way around.
     /// </summary>
     private List<CalendarMeeting> ResolveOverlappingMeetings(List<CalendarMeeting> meetings)
     {
@@ -388,28 +420,80 @@ public class EventToTimeSpanConverter
                 sorted[i] = new CalendarMeeting(breakStart, breakStart.AddMinutes(MinBreakMinutes), breakMeeting.Subject, breakMeeting.Category, breakMeeting.TicketNumber);
         }
 
-        // Second pass: resolve any remaining meeting-vs-meeting overlaps by pushing starts forward
+        // Second pass: resolve any remaining meeting-vs-meeting overlaps.
+        // Priority rules:
+        //   1. Fixed Outlook meetings (Meeting/Break) are immovable — their times never change.
+        //   2. Flexible ticket slots (Redmine/TFS) are capped at the start of the next fixed meeting
+        //      and truncated/dropped when they overlap with it.
+        //   3. Other slots are pushed past the previous end as a safe fallback.
         var resolved = new List<CalendarMeeting>();
         var previousEnd = TimeOnly.MinValue;
 
-        foreach (var current in sorted)
+        for (var idx = 0; idx < sorted.Count; idx++)
         {
+            var current = sorted[idx];
             var isBreak = current.Category == TimeSlotCategory.Break;
+            var isFlexible = IsFlexibleTicketSlot(current.Category);
 
-            // Breaks keep their repositioned start; regular meetings are pushed past the previous end
-            var start = (!isBreak && current.Start < previousEnd) ? previousEnd : current.Start;
-            var end = isBreak ? current.End : current.End;
+            TimeOnly start;
+            TimeOnly end;
+
+            if (isBreak)
+            {
+                // Breaks keep their repositioned start from the first pass
+                start = current.Start;
+                end = current.End;
+            }
+            else if (isFlexible)
+            {
+                // Flexible ticket slot: start after the previous slot, but never push into
+                // the next fixed (Outlook) meeting — cap end at that meeting's start instead.
+                start = current.Start < previousEnd ? previousEnd : current.Start;
+                end = current.End;
+
+                // Look ahead: find the nearest following fixed meeting that this slot would overlap
+                var nextFixed = sorted
+                    .Skip(idx + 1)
+                    .FirstOrDefault(m => !IsFlexibleTicketSlot(m.Category) && m.Category != TimeSlotCategory.Break);
+
+                if (nextFixed != null && end > nextFixed.Start)
+                {
+                    end = nextFixed.Start;
+                    Log.Debug("Capped flexible ticket slot {Subject} end at {Cap} to protect fixed meeting '{Next}'",
+                        current.Subject, end, nextFixed.Subject);
+                }
+
+                if (end <= start)
+                {
+                    Log.Debug("Dropping flexible ticket slot {Subject}: no room before next fixed meeting",
+                        current.Subject);
+                    continue;
+                }
+            }
+            else
+            {
+                // Fixed meetings are immovable relative to external events, but when two fixed
+                // meetings overlap each other the earlier one is truncated at the later one's start.
+                start = current.Start;
+                end = current.End;
+
+                // Look ahead: if the next fixed meeting starts before this one ends, truncate here
+                var nextFixed = sorted
+                    .Skip(idx + 1)
+                    .FirstOrDefault(m => !IsFlexibleTicketSlot(m.Category) && m.Category != TimeSlotCategory.Break);
+
+                if (nextFixed != null && end > nextFixed.Start)
+                {
+                    Log.Debug("Truncating fixed meeting '{Subject}' end from {OldEnd} to {NewEnd} due to overlap with '{Next}'",
+                        current.Subject, end, nextFixed.Start, nextFixed.Subject);
+                    end = nextFixed.Start;
+                }
+            }
 
             if (end <= start)
             {
                 Log.Debug("Skipping {Subject}: fully overlapped by previous slot", current.Subject);
                 continue;
-            }
-
-            if (start != current.Start)
-            {
-                Log.Debug("Adjusted {Subject} start: {OldStart} → {NewStart}",
-                    current.Subject, current.Start, start);
             }
 
             resolved.Add(new CalendarMeeting(start, end, current.Subject, current.Category, current.TicketNumber));

@@ -1,7 +1,7 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using FillMyADT.Models.Configuration;
 using Serilog;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace FillMyADT.Services;
 
@@ -26,8 +26,8 @@ public class ConfigurationService
         {
             WriteIndented = true,
             PropertyNameCaseInsensitive = true,
-            Converters = 
-            { 
+            Converters =
+            {
                 new JsonStringEnumConverter(),
                 new EventSourceConfigConverter()
             }
@@ -159,7 +159,7 @@ public class ConfigurationService
                 {
                     IsEnabled = true,
                     AutoDiscoverRepositories = true,
-                    ScanDirectory = @"C:\Work\Sync\Git\",
+                    ScanDirectory = @"E:\Work\Sync\Git\",
                     FilterByRecentActivity = true,
                     IncludeCommits = true,
                     IncludeBranchSwitches = true

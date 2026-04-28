@@ -56,7 +56,7 @@ public class ClipboardFormatterService
 
             sb.Append($"{slot.StartTime:HH:mm} - {slot.EndTime:HH:mm} ({durationStr})");
             if (!string.IsNullOrEmpty(slot.TicketNr))
-                sb.Append($" [#{slot.TicketNr}]");
+                sb.Append($" [{slot.TicketNr}]");
             if (!string.IsNullOrEmpty(slot.Source))
                 sb.Append($" [{slot.Source}]");
             sb.AppendLine();

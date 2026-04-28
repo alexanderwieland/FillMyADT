@@ -28,7 +28,8 @@ public class GitEventSource : IEventSource
 
     // Performance constants
     private const int MaxCommitsPerRepo = 50;   // Limit commits per repo (reduced from 100)
-    private const int MaxReflogEntries = 20;     // Limit reflog entries (reduced from 50)
+    private const int MaxReflogEntries = 20;     // Limit reflog entries for event scanning (recent activity only)
+    private const int MaxBranchLookupEntries = 500; // Higher limit for past-day branch lookup via reflog
     private const int GitCommandTimeoutSeconds = 5;  // Timeout for git commands (reduced from 10)
 
     private const string DefaultCommitDescription = "Umsetzung";
@@ -66,11 +67,15 @@ public class GitEventSource : IEventSource
 
         _repositoryPaths = paths;
 
-        // Resolve the default/primary repository for branch lookups
-        if (!string.IsNullOrWhiteSpace(config.DefaultRepositoryPath) && Directory.Exists(config.DefaultRepositoryPath))
+        // Resolve the default/primary repository for branch lookups.
+        // The configured value may be a full path OR just a folder name relative to ScanDirectory.
+        var resolvedDefault = ResolveDefaultRepositoryPath(config.DefaultRepositoryPath, config.ScanDirectory);
+
+        if (!string.IsNullOrWhiteSpace(resolvedDefault))
         {
-            _defaultRepositoryPath = config.DefaultRepositoryPath;
-            Log.Information("GitEventSource: default repository for branch lookups is {Path}", _defaultRepositoryPath);
+            _defaultRepositoryPath = resolvedDefault;
+            Log.Information("GitEventSource: default repository for branch lookups is '{Name}' ({Path})",
+                Path.GetFileName(_defaultRepositoryPath), _defaultRepositoryPath);
 
             // Make sure the default repo is also scanned for events
             if (!paths.Contains(_defaultRepositoryPath))
@@ -79,6 +84,9 @@ public class GitEventSource : IEventSource
         else
         {
             _defaultRepositoryPath = paths.Count > 0 ? paths[0] : null;
+            if (_defaultRepositoryPath != null)
+                Log.Information("GitEventSource: no DefaultRepositoryPath configured or resolved; " +
+                    "falling back to first repo '{Name}' for branch lookups", Path.GetFileName(_defaultRepositoryPath));
         }
 
         if (_repositoryPaths.Count == 0)
@@ -394,6 +402,34 @@ public class GitEventSource : IEventSource
         return null;
     }
 
+    /// <summary>
+    /// Resolve the configured DefaultRepositoryPath to an absolute directory.
+    /// Accepts: absolute path, or just a folder name / relative path resolved under ScanDirectory.
+    /// Returns null if nothing could be resolved.
+    /// </summary>
+    private static string? ResolveDefaultRepositoryPath(string? configured, string? scanDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(configured))
+            return null;
+
+        // 1. Already a valid absolute path
+        if (Path.IsPathRooted(configured) && Directory.Exists(configured))
+            return configured;
+
+        // 2. Try as a subfolder name / relative path under ScanDirectory
+        if (!string.IsNullOrWhiteSpace(scanDirectory))
+        {
+            var candidate = Path.Combine(scanDirectory, configured);
+            if (Directory.Exists(candidate))
+                return candidate;
+        }
+
+        Log.Warning("GitEventSource: DefaultRepositoryPath '{Configured}' could not be resolved " +
+            "(not an absolute path and not found under ScanDirectory '{ScanDir}')",
+            configured, scanDirectory ?? "(not set)");
+        return null;
+    }
+
     private static List<string> FindGitRepositories(string scanDirectory)
     {
         var repositories = new List<string>();
@@ -578,7 +614,7 @@ public class GitEventSource : IEventSource
     /// Handle rebase-related reflog actions.
     /// Start: resolves the target commit hash to a subject and branch refs.
     /// Finish: extracts the branch that was rebased.
-    /// All other rebase steps (pick, squash, amend, …) are skipped as noise.
+    /// All other rebase steps (pick, squash, amend, ï¿½) are skipped as noise.
     /// </summary>
     private async Task<Event?> HandleRebaseActionAsync(string action, string commitHash, DateTime timestamp, string repoPath, string repoName, CancellationToken cancellationToken)
     {
@@ -665,7 +701,7 @@ public class GitEventSource : IEventSource
             };
         }
 
-        // All other mid-rebase steps (pick, squash, amend, …) are noise — skip them
+        // All other mid-rebase steps (pick, squash, amend, ï¿½) are noise ï¿½ skip them
         Log.Debug("Skipping mid-rebase reflog entry: {Action}", action);
         return null;
     }
@@ -788,47 +824,97 @@ public class GitEventSource : IEventSource
     }
 
     /// <summary>
-    /// Get the branch that was active at a specific time by examining the default repository's reflog history
+    /// Get the branch that was active at a specific time by examining the default repository's reflog history.
+    /// Uses a date-scoped query so past days are found regardless of how many operations happened since.
     /// </summary>
     public async Task<string?> GetBranchAtTimeAsync(DateTime time, CancellationToken cancellationToken = default)
     {
         if (_defaultRepositoryPath == null)
+        {
+            Log.Warning("GetBranchAtTimeAsync: no default repository configured, cannot resolve branch for {Time}", time);
             return null;
+        }
+
+        Log.Information("GetBranchAtTimeAsync: looking up branch at {Time} in default repo '{Repo}'",
+            time, Path.GetFileName(_defaultRepositoryPath));
 
         try
         {
-            // OPTIMIZATION: Use structured format for easier parsing
+            // Use git log -g with a date window so we are never limited by a fixed entry count.
+            // We scan from start-of-day to time+1h to capture any checkout on that day.
+            var after  = time.Date.AddDays(-1).ToString(GitDateFormat);  // day before as lower bound
+            var before = time.AddHours(1).ToString(GitDateFormat);        // time + 1h as upper bound
+
             var output = await RunGitCommandAsync(
                 _defaultRepositoryPath,
-                $"reflog --format='%H|%gd|%gs' --date=iso -n {MaxReflogEntries}",
+                $"log -g --format=%H|%gd|%gs --date=iso --after=\"{after}\" --before=\"{before}\" -n {MaxBranchLookupEntries}",
                 cancellationToken);
 
-            if (string.IsNullOrWhiteSpace(output))
-                return await GetCurrentBranchAsync(cancellationToken);
-
-            var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-
-            foreach (var line in lines)
+            if (!string.IsNullOrWhiteSpace(output))
             {
-                if (!TryParseReflogLine(line, out var parsed) || parsed.Timestamp > time)
-                    continue;
+                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                Log.Debug("GetBranchAtTimeAsync: {Count} reflog entries in date window for '{Repo}'",
+                    lines.Length, Path.GetFileName(_defaultRepositoryPath));
 
-                if (parsed.Action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
+                // Entries are newest-first; find the last checkout at or before 'time'
+                foreach (var line in lines)
                 {
-                    var branchName = ExtractBranchNameFromCheckout(parsed.Action);
-                    if (!string.IsNullOrEmpty(branchName))
+                    if (!TryParseReflogLine(line, out var parsed) || parsed.Timestamp > time)
+                        continue;
+
+                    if (parsed.Action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
                     {
-                        Log.Debug("Branch at {Time}: {Branch} (from reflog entry at {EntryTime})", time, branchName, parsed.Timestamp);
-                        return branchName;
+                        var branchName = ExtractBranchNameFromCheckout(parsed.Action);
+                        if (!string.IsNullOrEmpty(branchName))
+                        {
+                            Log.Information("GetBranchAtTimeAsync: resolved branch '{Branch}' at {Time} (reflog entry at {EntryTime}) in '{Repo}'",
+                                branchName, time, parsed.Timestamp, Path.GetFileName(_defaultRepositoryPath));
+                            return branchName;
+                        }
+                    }
+                }
+
+                Log.Debug("GetBranchAtTimeAsync: no checkout entry found in date window, widening search");
+            }
+
+            // Fallback: scan a larger window (all reflog up to the target time)
+            var wideOutput = await RunGitCommandAsync(
+                _defaultRepositoryPath,
+                $"log -g --format=%H|%gd|%gs --date=iso -n {MaxBranchLookupEntries}",
+                cancellationToken);
+
+            if (!string.IsNullOrWhiteSpace(wideOutput))
+            {
+                var wideLines = wideOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                Log.Debug("GetBranchAtTimeAsync: wide search ï¿½ {Count} total reflog entries in '{Repo}'",
+                    wideLines.Length, Path.GetFileName(_defaultRepositoryPath));
+
+                foreach (var line in wideLines)
+                {
+                    if (!TryParseReflogLine(line, out var parsed) || parsed.Timestamp > time)
+                        continue;
+
+                    if (parsed.Action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var branchName = ExtractBranchNameFromCheckout(parsed.Action);
+                        if (!string.IsNullOrEmpty(branchName))
+                        {
+                            Log.Information("GetBranchAtTimeAsync: resolved branch '{Branch}' at {Time} via wide search (reflog entry at {EntryTime}) in '{Repo}'",
+                                branchName, time, parsed.Timestamp, Path.GetFileName(_defaultRepositoryPath));
+                            return branchName;
+                        }
                     }
                 }
             }
 
+            Log.Warning("GetBranchAtTimeAsync: no checkout found in reflog of '{Repo}' for {Time}; falling back to current branch",
+                Path.GetFileName(_defaultRepositoryPath), time);
             return await GetCurrentBranchAsync(cancellationToken);
         }
         catch (Exception ex)
         {
-            Log.Warning(ex, "Error getting branch at time {Time}", time);
+            Log.Warning(ex, "GetBranchAtTimeAsync: error querying reflog of '{Repo}' for {Time}",
+                Path.GetFileName(_defaultRepositoryPath), time);
             return await GetCurrentBranchAsync(cancellationToken);
         }
     }
@@ -845,5 +931,62 @@ public class GitEventSource : IEventSource
         var ticketNumber = TicketParser.FromGitText(branchName);
         Log.Debug("Branch at {Time}: {Branch}, Ticket: {Ticket}", time, branchName, ticketNumber ?? "none");
         return ticketNumber;
+    }
+
+    /// <summary>
+    /// Scan every reflog entry for a given calendar day (commits, rebases, checkouts) and return
+    /// the first ticket number found in any action message or branch name.
+    /// This is the fallback when the checked-out branch name itself carries no ticket number.
+    /// </summary>
+    public async Task<string?> GetTicketFromDayReflogAsync(DateTime day, CancellationToken cancellationToken = default)
+    {
+        if (_defaultRepositoryPath == null)
+            return null;
+
+        var after  = day.Date.AddDays(-1).ToString(GitDateFormat);
+        var before = day.Date.AddDays(1).ToString(GitDateFormat);
+
+        try
+        {
+            var output = await RunGitCommandAsync(
+                _defaultRepositoryPath,
+                $"log -g --format=%H|%gd|%gs --date=iso --after=\"{after}\" --before=\"{before}\" -n {MaxBranchLookupEntries}",
+                cancellationToken);
+
+            if (string.IsNullOrWhiteSpace(output))
+                return null;
+
+            var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            Log.Debug("GetTicketFromDayReflogAsync: {Count} reflog entries on {Date} in '{Repo}'",
+                lines.Length, day.Date.ToShortDateString(), Path.GetFileName(_defaultRepositoryPath));
+
+            foreach (var line in lines)
+            {
+                if (!TryParseReflogLine(line, out var parsed))
+                    continue;
+
+                // Skip pure rebase noise lines (mid-step entries with no useful message)
+                if (parsed.Action.Equals("rebase", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var ticket = TicketParser.FromGitText(parsed.Action);
+                if (!string.IsNullOrEmpty(ticket))
+                {
+                    Log.Information("GetTicketFromDayReflogAsync: found ticket '{Ticket}' in reflog entry '{Action}' on {Date} in '{Repo}'",
+                        ticket, parsed.Action, day.Date.ToShortDateString(), Path.GetFileName(_defaultRepositoryPath));
+                    return ticket;
+                }
+            }
+
+            Log.Debug("GetTicketFromDayReflogAsync: no ticket found in reflog for {Date} in '{Repo}'",
+                day.Date.ToShortDateString(), Path.GetFileName(_defaultRepositoryPath));
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "GetTicketFromDayReflogAsync: error scanning reflog of '{Repo}' for {Date}",
+                Path.GetFileName(_defaultRepositoryPath), day.Date.ToShortDateString());
+        }
+
+        return null;
     }
 }

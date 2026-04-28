@@ -32,7 +32,7 @@ public record EdgeEventSourceConfig : EventSourceConfig
     /// <summary>
     /// Minimum visit duration in seconds to include (filters out quick page loads)
     /// </summary>
-    public int MinVisitDurationSeconds { get; init; } = 5;
+    public int MinVisitDurationSeconds { get; init; } = 10;
 
     /// <summary>
     /// Maximum number of visits to retrieve per query (performance limit)
