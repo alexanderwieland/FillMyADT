@@ -1,0 +1,137 @@
+@page "/settings"
+@using System.IO
+@using FillMyADT.Models.Configuration
+@inject ConfigurationService ConfigService
+
+<div class="home-container settings-container">
+    <div class="page-header">
+        <h1>Settings</h1>
+        <a class="btn" href="/">&larr; Back</a>
+    </div>
+    <p class="settings-path">Stored in <code>@ConfigService.ConfigFilePath</code></p>
+
+    @if (!string.IsNullOrEmpty(statusMessage))
+    {
+        <div class="@(statusIsError ? "error-message" : "sources-info")">@statusMessage</div>
+    }
+
+    <fieldset>
+        <legend>General</legend>
+        <label>Initials <input @bind="config.Initials" /></label>
+        <label>Work hours (holiday) <input type="number" step="0.1" min="0" max="24" @bind="config.WorkHours" /></label>
+        <label>
+            Default location
+            <select @bind="config.DefaultLocation">
+                @foreach (var location in Enum.GetValues<Location>())
+                {
+                    <option value="@location">@location</option>
+                }
+            </select>
+        </label>
+    </fieldset>
+
+    <fieldset>
+        <legend><label><input type="checkbox" @bind="config.Windows.IsEnabled" /> Windows events</label></legend>
+    </fieldset>
+
+    <fieldset>
+        <legend><label><input type="checkbox" @bind="config.Git.IsEnabled" /> Git</label></legend>
+        <label>Scan directory <input @bind="config.Git.ScanDirectory" /></label>
+        <label>Default repository (path or folder name) <input @bind="config.Git.DefaultRepositoryPath" /></label>
+        <label>Additional repository paths (one per line) <textarea rows="3" @bind="gitRepositoryPaths"></textarea></label>
+        <label>Branches to include (one per line, empty = all) <textarea rows="2" @bind="gitIncludeBranches"></textarea></label>
+        <label>Author name filter <input @bind="config.Git.FilterByAuthorName" /></label>
+        <label>Author email filter <input @bind="config.Git.FilterByAuthorEmail" /></label>
+        <label class="check"><input type="checkbox" @bind="config.Git.AutoDiscoverRepositories" /> Auto-discover repositories</label>
+        <label class="check"><input type="checkbox" @bind="config.Git.FilterByRecentActivity" /> Only scan repositories with recent activity</label>
+        <label class="check"><input type="checkbox" @bind="config.Git.UseFetchHeadFilter" /> Use FETCH_HEAD for quick activity check</label>
+        <label class="check"><input type="checkbox" @bind="config.Git.IncludeCommits" /> Include commits</label>
+        <label class="check"><input type="checkbox" @bind="config.Git.IncludeBranchSwitches" /> Include branch switches</label>
+    </fieldset>
+
+    <fieldset>
+        <legend><label><input type="checkbox" @bind="config.Outlook.IsEnabled" /> Outlook calendar</label></legend>
+        <label>Minimum meeting duration (minutes) <input type="number" min="0" @bind="config.Outlook.MinimumDurationMinutes" /></label>
+        <label>Home office suffix <input @bind="config.Outlook.HomeOfficeSuffix" /></label>
+        <label>Holiday suffix <input @bind="config.Outlook.HolidaySuffix" /></label>
+        <label>Zeitausgleich suffix <input @bind="config.Outlook.ZeitausgleichSuffix" /></label>
+        <label class="check"><input type="checkbox" @bind="config.Outlook.IncludeTeamsMeetings" /> Include Teams meetings</label>
+        <label class="check"><input type="checkbox" @bind="config.Outlook.IncludeAllDayEvents" /> Include all-day events</label>
+        <label class="check"><input type="checkbox" @bind="config.Outlook.EnableSpecialWholeDayEvents" /> Detect home office / holiday / ZA whole-day events</label>
+        <label class="check"><input type="checkbox" @bind="config.Outlook.RequireRunningInstance" /> Only use a running Outlook instance</label>
+    </fieldset>
+
+    <fieldset>
+        <legend><label><input type="checkbox" @bind="config.Edge.IsEnabled" /> Edge history</label></legend>
+        <label>Profile path <input @bind="config.Edge.ProfilePath" /></label>
+        <label>Include domains (one per line, empty = all) <textarea rows="3" @bind="edgeIncludeDomains"></textarea></label>
+        <label>Exclude domains (one per line) <textarea rows="2" @bind="edgeExcludeDomains"></textarea></label>
+        <label>Minimum visit duration (seconds) <input type="number" min="0" @bind="config.Edge.MinVisitDurationSeconds" /></label>
+        <label>Max visits per query <input type="number" min="1" @bind="config.Edge.MaxVisitsPerQuery" /></label>
+        <label>TFS minimum 15-min blocks <input type="number" min="1" @bind="config.Edge.TfsMinBlocks" /></label>
+        <label class="check"><input type="checkbox" @bind="config.Edge.IncludePageTitle" /> Include page title</label>
+    </fieldset>
+
+    <div class="action-buttons">
+        <button class="btn btn-export" @onclick="Save">💾 Save</button>
+        <button class="btn" @onclick="Reset">↺ Discard changes</button>
+        <button class="btn" @onclick="RestoreDefaults">Restore defaults</button>
+    </div>
+</div>
+
+@code {
+    private AppConfiguration config = null!;
+    private string gitRepositoryPaths = string.Empty;
+    private string gitIncludeBranches = string.Empty;
+    private string edgeIncludeDomains = string.Empty;
+    private string edgeExcludeDomains = string.Empty;
+    private string? statusMessage;
+    private bool statusIsError;
+
+    protected override void OnInitialized() => Edit(ConfigService.CreateEditableCopy());
+
+    private void Edit(AppConfiguration configuration)
+    {
+        config = configuration;
+        gitRepositoryPaths = string.Join(Environment.NewLine, config.Git.RepositoryPaths);
+        gitIncludeBranches = string.Join(Environment.NewLine, config.Git.IncludeBranches);
+        edgeIncludeDomains = string.Join(Environment.NewLine, config.Edge.IncludeDomains);
+        edgeExcludeDomains = string.Join(Environment.NewLine, config.Edge.ExcludeDomains);
+    }
+
+    private void Save()
+    {
+        config.Git.RepositoryPaths = SplitLines(gitRepositoryPaths);
+        config.Git.IncludeBranches = SplitLines(gitIncludeBranches);
+        config.Edge.IncludeDomains = SplitLines(edgeIncludeDomains);
+        config.Edge.ExcludeDomains = SplitLines(edgeExcludeDomains);
+
+        try
+        {
+            ConfigService.Save(config);
+            statusIsError = false;
+            statusMessage = "Settings saved and applied.";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            statusIsError = true;
+            statusMessage = $"Could not save settings: {ex.Message}";
+        }
+    }
+
+    private void Reset()
+    {
+        Edit(ConfigService.CreateEditableCopy());
+        statusMessage = null;
+    }
+
+    private void RestoreDefaults()
+    {
+        Edit(ConfigurationService.CreateDefaultConfiguration());
+        statusIsError = false;
+        statusMessage = "Defaults loaded. Click Save to apply.";
+    }
+
+    private static List<string> SplitLines(string value) =>
+        value.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+}

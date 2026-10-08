@@ -14,13 +14,15 @@ public class EventAggregatorService
 {
     private static readonly ILogger Log = Serilog.Log.ForContext<EventAggregatorService>();
 
-    private readonly IEnumerable<IEventSource> _eventSources;
+    private readonly EventSourceRegistry _registry;
 
-    public EventAggregatorService(IEnumerable<IEventSource> eventSources)
+    private IReadOnlyList<IEventSource> _eventSources => _registry.Sources;
+
+    public EventAggregatorService(EventSourceRegistry registry)
     {
-        ArgumentNullException.ThrowIfNull(eventSources);
-        _eventSources = eventSources;
-        Log.Information("EventAggregatorService initialized with {Count} event sources", eventSources.Count());
+        ArgumentNullException.ThrowIfNull(registry);
+        _registry = registry;
+        Log.Information("EventAggregatorService initialized with {Count} event sources", _eventSources.Count);
     }
 
     /// <summary>
@@ -55,10 +57,13 @@ public class EventAggregatorService
 
         var allEvents = new List<Event>();
 
-        // Execute sources sequentially in order
-        foreach (var source in orderedSources)
+        // Execute sources concurrently, but merge results in priority order
+        var sourceTasks = orderedSources
+            .Select(source => GetEventsFromSourceAsync(source, startDate, endDate, cancellationToken))
+            .ToList();
+
+        foreach (var sourceEvents in await Task.WhenAll(sourceTasks))
         {
-            var sourceEvents = await GetEventsFromSourceAsync(source, startDate, endDate, cancellationToken);
             if (sourceEvents != null)
             {
                 allEvents.AddRange(sourceEvents);

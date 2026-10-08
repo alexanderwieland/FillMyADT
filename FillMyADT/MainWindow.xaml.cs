@@ -46,18 +46,13 @@ namespace FillMyADT
             serviceCollection.AddBlazorWebViewDeveloperTools();
 #endif
 
-            var appConfig = new ConfigurationService().Load();
-
-            serviceCollection.AddSingleton<IEventSource>(new WindowsEventSource(appConfig.GetSourceConfig<WindowsEventSourceConfig>()));
-            var gitSource = new GitEventSource(appConfig.GetSourceConfig<GitEventSourceConfig>());
-            serviceCollection.AddSingleton<IEventSource>(gitSource);
-            serviceCollection.AddSingleton<IEventSource>(new OutlookEventSource(appConfig.GetSourceConfig<OutlookEventSourceConfig>(), appConfig));
-            serviceCollection.AddSingleton<IEventSource>(new EdgeEventSource(appConfig.GetSourceConfig<EdgeEventSourceConfig>()));
-
+            serviceCollection.AddSingleton<ConfigurationService>();
+            serviceCollection.AddSingleton<EventSourceRegistry>();
             serviceCollection.AddSingleton<EventAggregatorService>();
-            serviceCollection.AddSingleton(new EventToTimeSpanConverter(gitSource, appConfig));
+            serviceCollection.AddSingleton(sp => new EventToTimeSpanConverter(
+                sp.GetRequiredService<EventSourceRegistry>(), sp.GetRequiredService<ConfigurationService>()));
             serviceCollection.AddSingleton<ClipboardFormatterService>();
-            serviceCollection.AddSingleton(new AdtXmlExportService(appConfig));
+            serviceCollection.AddSingleton<AdtXmlExportService>();
 
             return serviceCollection.BuildServiceProvider();
         }

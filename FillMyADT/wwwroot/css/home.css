@@ -218,3 +218,14 @@
 .btn-export { background-color: #007bff; color: white; }
 .btn-export:hover:not(:disabled) { background-color: #0056b3; }
 
+
+/* Settings */
+.page-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.page-header .btn { text-decoration: none; }
+.settings-path { font-size: 0.85em; opacity: 0.8; }
+.settings-container fieldset { border: 1px solid #ccc; border-radius: 6px; margin: 0 0 1rem; padding: 0.75rem 1rem; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 0.5rem 1.5rem; }
+.settings-container legend { font-weight: 600; padding: 0 0.25rem; }
+.settings-container fieldset > label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9em; }
+.settings-container fieldset > label.check { flex-direction: row; align-items: center; }
+.settings-container input:not([type=checkbox]), .settings-container select, .settings-container textarea { padding: 0.3rem; font: inherit; }
+

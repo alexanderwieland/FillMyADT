@@ -19,12 +19,13 @@ else
         <div class="events">
             @foreach (var evt in Events)
             {
-                <div class="event-item @GetEventClass(evt.EventType) @GetSourceClass(evt.Source)">
+                var sourcePresentation = GetSourcePresentation(evt.Source);
+                <div class="event-item @GetEventClass(evt.EventType) @sourcePresentation.CssClass">
                     <div class="event-time">
                         @evt.Timestamp.ToString("HH:mm:ss")
                     </div>
                     <div class="event-source-badge">
-                        @GetSourceBadge(evt.Source)
+                        @sourcePresentation.Badge
                     </div>
                     <div class="event-details">
                         <div class="event-type">@evt.EventType</div>
@@ -96,25 +97,17 @@ else
         };
 
 
-    private static string GetSourceClass(string source)
-    {
-        if (source.Contains("Git History", StringComparison.OrdinalIgnoreCase))
-            return "source-git";
-        if (source.Contains("Windows", StringComparison.OrdinalIgnoreCase))
-            return "source-windows";
-        return "source-other";
-    }
-
-    private static string GetSourceBadge(string source)
+    private static (string CssClass, string Badge) GetSourcePresentation(string source)
     {
         if (source.Contains("Git History", StringComparison.OrdinalIgnoreCase))
         {
             var parts = source.Split(" - ", 2);
-            return parts.Length > 1 ? parts[1] : "Git";
+            return ("source-git", parts.Length > 1 ? parts[1] : "Git");
         }
-        if (source.Contains("Windows", StringComparison.OrdinalIgnoreCase))
-            return "Windows";
-        return source;
+
+        return source.Contains("Windows", StringComparison.OrdinalIgnoreCase)
+            ? ("source-windows", "Windows")
+            : ("source-other", source);
     }
 }
 

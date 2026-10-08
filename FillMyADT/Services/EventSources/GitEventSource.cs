@@ -135,19 +135,29 @@ public class GitEventSource : IEventSource
 
         var allEvents = new List<Event>();
 
-        foreach (var repoPath in reposToScan)
+        // Scan repositories in parallel (bounded), merge results in original order
+        using var throttle = new SemaphoreSlim(Environment.ProcessorCount);
+        var repoTasks = reposToScan.Select(async repoPath =>
         {
             var repoName = Path.GetFileName(repoPath);
+            await throttle.WaitAsync(cancellationToken);
             try
             {
-                var events = await GetEventsFromRepositoryAsync(repoPath, startDate, endDate, cancellationToken);
-                allEvents.AddRange(events);
+                return await GetEventsFromRepositoryAsync(repoPath, startDate, endDate, cancellationToken);
             }
             catch (Exception ex)
             {
                 Log.Error(ex, "GitEventSource: error reading Git events from repository {RepoName} ({Path})", repoName, repoPath);
+                return [];
             }
-        }
+            finally
+            {
+                throttle.Release();
+            }
+        }).ToList();
+
+        foreach (var events in await Task.WhenAll(repoTasks))
+            allEvents.AddRange(events);
 
         stopwatch.Stop();
         Log.Information("GitEventSource: Found {EventCount} events from {RepoCount} repositories in {ElapsedMs}ms",
@@ -485,6 +495,13 @@ public class GitEventSource : IEventSource
                         }
                     }
                 }
+            }
+
+            // OPTIMIZATION: If HEAD has not moved since before the range, it cannot contain commits from the range
+            var headLog = Path.Combine(repoPath, ".git", "logs", "HEAD");
+            if (File.Exists(headLog) && File.GetLastWriteTime(headLog) < startDate)
+            {
+                return false;
             }
 
             // OPTIMIZATION: Use HEAD instead of --all for faster activity check

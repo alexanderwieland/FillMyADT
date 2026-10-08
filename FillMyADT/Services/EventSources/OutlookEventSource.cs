@@ -67,6 +67,12 @@ public class OutlookEventSource : IEventSource
 
     public async Task<IEnumerable<Event>> GetEventsAsync(DateTime startDate, DateTime endDate, CancellationToken cancellationToken = default)
     {
+        if (!_config.IsEnabled)
+        {
+            Log.Debug("OutlookEventSource is disabled");
+            return [];
+        }
+
         return await Task.Run(() =>
         {
             var events = new List<Event>();
@@ -292,6 +298,9 @@ public class OutlookEventSource : IEventSource
 
     public async Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default)
     {
+        if (!_config.IsEnabled)
+            return false;
+
         return await Task.Run(() =>
         {
             try

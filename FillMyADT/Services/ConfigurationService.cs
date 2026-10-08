@@ -1,4 +1,5 @@
-﻿using FillMyADT.Models.Configuration;
+using FillMyADT.Models;
+using FillMyADT.Models.Configuration;
 using Serilog;
 using System.IO;
 using System.Text.Json;
@@ -7,7 +8,7 @@ using System.Text.Json.Serialization;
 namespace FillMyADT.Services;
 
 /// <summary>
-/// Loads the application configuration stored in LocalAppData, creating a default file on first run.
+/// Loads and saves the application configuration stored in LocalAppData and notifies listeners on changes.
 /// </summary>
 public class ConfigurationService
 {
@@ -17,7 +18,7 @@ public class ConfigurationService
     {
         WriteIndented = true,
         PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter(), new EventSourceConfigConverter() }
+        Converters = { new JsonStringEnumConverter() }
     };
 
     private readonly string _configFilePath;
@@ -28,12 +29,50 @@ public class ConfigurationService
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FillMyADT");
         Directory.CreateDirectory(configDirectory);
         _configFilePath = Path.Combine(configDirectory, "config.json");
+        Current = Load();
     }
 
     /// <summary>
-    /// Load the configuration, writing defaults first if no file exists. Falls back to defaults on errors.
+    /// The active configuration. Treat as read-only; use <see cref="CreateEditableCopy"/> and <see cref="Save"/> to change it.
     /// </summary>
-    public AppConfiguration Load()
+    public AppConfiguration Current { get; private set; }
+
+    /// <summary>
+    /// Full path of the configuration file
+    /// </summary>
+    public string ConfigFilePath => _configFilePath;
+
+    /// <summary>
+    /// Raised after a new configuration has been saved and activated
+    /// </summary>
+    public event Action<AppConfiguration>? Changed;
+
+    /// <summary>
+    /// Create a deep copy of the current configuration for editing
+    /// </summary>
+    public AppConfiguration CreateEditableCopy() => Clone(Current);
+
+    /// <summary>
+    /// Create a configuration with default values
+    /// </summary>
+    public static AppConfiguration CreateDefaultConfiguration() => new();
+
+    /// <summary>
+    /// Persist the configuration, activate it and notify listeners
+    /// </summary>
+    public void Save(AppConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        var snapshot = Clone(configuration);
+        File.WriteAllText(_configFilePath, JsonSerializer.Serialize(snapshot, JsonOptions));
+        Log.Information("Configuration saved to {Path}", _configFilePath);
+
+        Current = snapshot;
+        Changed?.Invoke(snapshot);
+    }
+
+    private AppConfiguration Load()
     {
         try
         {
@@ -54,15 +93,8 @@ public class ConfigurationService
         }
     }
 
-    private static AppConfiguration CreateDefaultConfiguration() => new()
-    {
-        EventSources =
-        [
-            new WindowsEventSourceConfig(),
-            new GitEventSourceConfig { ScanDirectory = @"C:\Work\Sync\Git\" },
-            new OutlookEventSourceConfig()
-        ]
-    };
+    private static AppConfiguration Clone(AppConfiguration configuration) =>
+        JsonSerializer.Deserialize<AppConfiguration>(JsonSerializer.Serialize(configuration, JsonOptions), JsonOptions)!;
 }
 
 /// <summary>
@@ -71,7 +103,7 @@ public class ConfigurationService
 public class AppConfiguration
 {
     /// <summary>
-    /// User initials for event names (e.g., "apw")
+    /// User initials for event names and the ADT export (e.g., "apw")
     /// </summary>
     public string Initials { get; set; } = "apw";
 
@@ -83,50 +115,13 @@ public class AppConfiguration
     /// <summary>
     /// Default location for time slots when not in home office
     /// </summary>
-    public string DefaultLocation { get; set; } = "WV";
+    public Location DefaultLocation { get; set; } = Location.WV;
 
-    /// <summary>
-    /// Event source configurations
-    /// </summary>
-    public List<EventSourceConfig> EventSources { get; set; } = [];
+    public WindowsEventSourceConfig Windows { get; set; } = new();
 
-    /// <summary>
-    /// Get the configuration for an event source type, or its defaults if not configured
-    /// </summary>
-    public T GetSourceConfig<T>() where T : EventSourceConfig, new() =>
-        EventSources.OfType<T>().FirstOrDefault() ?? new T();
-}
+    public GitEventSourceConfig Git { get; set; } = new() { ScanDirectory = @"C:\Work\Sync\Git\" };
 
-/// <summary>
-/// Custom JSON converter for EventSourceConfig to handle polymorphism
-/// </summary>
-public class EventSourceConfigConverter : JsonConverter<EventSourceConfig>
-{
-    public override EventSourceConfig Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        using var doc = JsonDocument.ParseValue(ref reader);
-        var root = doc.RootElement;
+    public OutlookEventSourceConfig Outlook { get; set; } = new();
 
-        if (!root.TryGetProperty("SourceType", out var sourceTypeElement))
-        {
-            throw new JsonException("SourceType property is required");
-        }
-
-        var sourceType = sourceTypeElement.GetString();
-        var json = root.GetRawText();
-
-        return sourceType switch
-        {
-            "WindowsEventSource" => JsonSerializer.Deserialize<WindowsEventSourceConfig>(json, options)!,
-            "GitEventSource" => JsonSerializer.Deserialize<GitEventSourceConfig>(json, options)!,
-            "OutlookEventSource" => JsonSerializer.Deserialize<OutlookEventSourceConfig>(json, options)!,
-            "EdgeEventSource" => JsonSerializer.Deserialize<EdgeEventSourceConfig>(json, options)!,
-            _ => throw new JsonException($"Unknown SourceType: {sourceType}")
-        };
-    }
-
-    public override void Write(Utf8JsonWriter writer, EventSourceConfig value, JsonSerializerOptions options)
-    {
-        JsonSerializer.Serialize(writer, value, value.GetType(), options);
-    }
+    public EdgeEventSourceConfig Edge { get; set; } = new();
 }

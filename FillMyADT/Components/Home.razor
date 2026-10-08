@@ -7,7 +7,10 @@
 @implements IDisposable
 
 <div class="home-container">
-    <h1>Daily Activity Tracker</h1>
+    <div class="page-header">
+        <h1>Daily Activity Tracker</h1>
+        <a class="btn" href="/settings" title="Settings">⚙️ Settings</a>
+    </div>
     <p>Track your daily activities from Windows events and Git history</p>
 
     <div class="controls">
@@ -132,9 +135,7 @@
         try
         {
             events = await EventAggregator.GetEventsForDayAsync(selectedDate, cancellationToken);
-            SetTimeSlots(events.Count > 0
-                ? await TimeSlotConverter.ConvertEventsToTimeSlotsAsync(events, cancellationToken)
-                : []);
+            SetTimeSlots(await TimeSlotConverter.ConvertEventsToTimeSlotsAsync(events, cancellationToken));
         }
         catch (OperationCanceledException)
         {
@@ -161,7 +162,7 @@
     {
         timeSlots = slots;
         exportPreview = AdtExportService.GetExportPreview(timeSlots, selectedDate);
-        excludedCount = timeSlots.Count(ts => ts.Category == TimeSlotCategory.Break);
+        excludedCount = timeSlots.Count - exportPreview.Count;
     }
 
     private Task LoadDateAsync(DateTime date)

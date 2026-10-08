@@ -12,11 +12,14 @@ public class AdtXmlExportService
 {
     private static readonly ILogger Log = Serilog.Log.ForContext<AdtXmlExportService>();
 
-    private readonly AppConfiguration _appConfig;
+    private readonly ConfigurationService _configurationService;
 
-    public AdtXmlExportService(AppConfiguration appConfig)
+    private AppConfiguration _appConfig => _configurationService.Current;
+
+    public AdtXmlExportService(ConfigurationService configurationService)
     {
-        _appConfig = appConfig;
+        ArgumentNullException.ThrowIfNull(configurationService);
+        _configurationService = configurationService;
     }
 
     /// <summary>
@@ -80,23 +83,10 @@ public class AdtXmlExportService
     /// </summary>
     private XDocument CreateAdtXml(IReadOnlyList<TimeSlot> timeSlots, DateTime date)
     {
-        var root = new XElement("NewDataSet");
-
-        foreach (var slot in timeSlots)
-        {
-            if (slot.Category == TimeSlotCategory.Break)
-                continue; // Skip breaks
-
-            var adoffen = CreateAdoffenElement(slot, date);
-            root.Add(adoffen);
-        }
-
-        var document = new XDocument(
+        return new XDocument(
             new XDeclaration("1.0", "utf-8", "yes"),
-            root
+            new XElement("NewDataSet", GetExportPreview(timeSlots, date).Select(CreateAdoffenElement))
         );
-
-        return document;
     }
 
     /// <summary>
@@ -118,24 +108,24 @@ public class AdtXmlExportService
             Betrieb = GetBetrieb(slot),
             Projekt = GetProjekt(slot),
             Dokumentation = GetDokumentation(slot),
-            Bereich = GetBereich(slot)
+            Bereich = "DEV"
         };
     }
 
     /// <summary>
-    /// Create ADoffen element for a single time slot
+    /// Create ADoffen element for a single export entry
     /// </summary>
-    private XElement CreateAdoffenElement(TimeSlot slot, DateTime date)
+    private static XElement CreateAdoffenElement(AdtExportEntry entry)
     {
-        var entry = CreateExportEntry(slot, date);
+        var duration = entry.Dauer.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
 
         return new XElement("ADoffen",
             new XElement("BA", entry.BA),
             new XElement("Datum", entry.Datum.ToString("yyyy-MM-ddTHH:mm:sszzz")),
             new XElement("Beginn", entry.Beginn),
             new XElement("Ende", entry.Ende),
-            new XElement("Dauer", entry.Dauer.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)),
-            new XElement("DauerWV", entry.Dauer.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)),
+            new XElement("Dauer", duration),
+            new XElement("DauerWV", duration),
             new XElement("Ort", entry.Ort),
             new XElement("Betrieb", entry.Betrieb),
             new XElement("Projekt", entry.Projekt),
@@ -228,14 +218,14 @@ public class AdtXmlExportService
         // Use ticket number if available, otherwise default
         if (!string.IsNullOrEmpty(slot.TicketNr))
         {
-            return $"{slot.TicketNr}";
+            return slot.TicketNr;
         }
-        else         if (slot.Category == TimeSlotCategory.Work)
+        if (slot.Category == TimeSlotCategory.Work)
         {
             return "MIMWART";
         }
 
-            return "02-ORGA-Divers"; // Default project
+        return "02-ORGA-Divers"; // Default project
     }
 
     /// <summary>
@@ -285,27 +275,6 @@ public class AdtXmlExportService
         // Use slot text, truncate if too long
         var text = slot.Text ?? "Umsetzung";
         return text.Length > 100 ? text.Substring(0, 100) : text;
-    }
-
-    /// <summary>
-    /// Get area/department (Bereich) - DEFAULT LOGIC, ADAPT AS NEEDED
-    /// </summary>
-    private string GetBereich(TimeSlot slot)
-    {
-        // TODO: Add your custom logic here
-        // Examples:
-        // - Map based on project
-        // - Extract from metadata
-        // - Use category-based logic
-
-        // Map source to department
-        return slot.Source switch
-        {
-            "Git" => "DEV",
-            "Outlook" => "DEV",
-            "Edge Browser" => "DEV",
-            _ => "DEV"
-        };
     }
 
     #endregion

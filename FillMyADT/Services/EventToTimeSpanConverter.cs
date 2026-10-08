@@ -13,8 +13,11 @@ public class EventToTimeSpanConverter
 {
     private static readonly ILogger Log = Serilog.Log.ForContext<EventToTimeSpanConverter>();
 
-    private readonly GitEventSource? _gitEventSource;
-    private readonly AppConfiguration? _appConfig;
+    private readonly EventSourceRegistry? _registry;
+    private readonly ConfigurationService? _configurationService;
+
+    private GitEventSource? _gitEventSource => _registry?.Git;
+    private AppConfiguration? _appConfig => _configurationService?.Current;
 
     private const int StandardRoundingMinutes = 15;
     private const int FirstSlotRoundingMinutes = 5;
@@ -28,10 +31,10 @@ public class EventToTimeSpanConverter
     private static readonly TimeOnly DefaultBreakStart = new(11, 30);
     private static readonly TimeOnly DefaultBreakEnd = new(12, 00);
 
-    public EventToTimeSpanConverter(GitEventSource? gitEventSource = null, AppConfiguration? appConfig = null)
+    public EventToTimeSpanConverter(EventSourceRegistry? registry = null, ConfigurationService? configurationService = null)
     {
-        _gitEventSource = gitEventSource;
-        _appConfig = appConfig;
+        _registry = registry;
+        _configurationService = configurationService;
     }
 
     /// <summary>
@@ -169,18 +172,10 @@ public class EventToTimeSpanConverter
     /// </summary>
     private IReadOnlyList<TimeSlot> ConvertEventsToTimeSlotsInternal(IReadOnlyList<Event> events, List<(DateTime Time, string Branch, string? Ticket)> branchHistory)
     {
-        ArgumentNullException.ThrowIfNull(events);
-
-        if (events.Count == 0)
-        {
-            return [];
-        }
-
         var sortedEvents = events.OrderBy(e => e.Timestamp).ToList();
 
         // Check for Homeoffice day (handled differently - sets location on all slots)
-        var homeofficeEvent = sortedEvents.FirstOrDefault(e => e.EventType == EventType.SpecialWholeDayHomeoffice);
-        bool isHomeofficeDay = homeofficeEvent != null;
+        var isHomeofficeDay = sortedEvents.Any(e => e.EventType == EventType.SpecialWholeDayHomeoffice);
 
         // Check for special whole-day events that override all slots (Holiday or Zeitausgleich)
         var specialEvent = sortedEvents.FirstOrDefault(e =>
@@ -195,7 +190,6 @@ public class EventToTimeSpanConverter
 
         // Find Boot and Shutdown events to determine work boundaries
         var bootEvent = sortedEvents.FirstOrDefault(e => e.EventType == EventType.Boot);
-        var shutdownEvent = sortedEvents.LastOrDefault(e => e.EventType == EventType.Shutdown);
 
         if (bootEvent == null)
         {
@@ -212,7 +206,20 @@ public class EventToTimeSpanConverter
                         || (e.EventType is EventType.CalendarMeetingEnd or EventType.ReviewEnd or EventType.TicketEnd
                             && DateOnly.FromDateTime(e.Timestamp) == date.AddDays(1)))
             .ToList();
-        shutdownEvent = sortedEvents.LastOrDefault(e => e.EventType == EventType.Shutdown);
+        // Shutdown followed by a later boot is an off period; only a trailing shutdown ends the day
+        var offPeriods = new List<(TimeOnly Start, TimeOnly End)>();
+        Event? shutdownEvent = null;
+        foreach (var e in sortedEvents.Where(e => e.EventType is EventType.Boot or EventType.Shutdown && e.Timestamp > bootEvent.Timestamp))
+        {
+            if (e.EventType == EventType.Shutdown)
+                shutdownEvent = e;
+            else if (shutdownEvent != null)
+            {
+                offPeriods.Add((TimeHelper.RoundDown(TimeOnly.FromDateTime(shutdownEvent.Timestamp), LastSlotRoundingMinutes),
+                                TimeHelper.RoundUp(TimeOnly.FromDateTime(e.Timestamp), FirstSlotRoundingMinutes)));
+                shutdownEvent = null;
+            }
+        }
 
         // First slot: boot rounded up to 5min, until next quarter hour
         var firstSlotStart = TimeHelper.RoundUp(TimeOnly.FromDateTime(bootEvent.Timestamp), FirstSlotRoundingMinutes);
@@ -228,7 +235,9 @@ public class EventToTimeSpanConverter
         var workStart = firstSlotEnd;
         var workEnd = shutdownEvent != null
             ? TimeHelper.RoundDown(TimeOnly.FromDateTime(shutdownEvent.Timestamp), LastSlotRoundingMinutes)
-            : new TimeOnly(22, 0); // Default to 10 PM if no shutdown
+            : date == DateOnly.FromDateTime(DateTime.Today) && DateTime.Now.TimeOfDay < new TimeSpan(22, 0, 0)
+                ? TimeHelper.RoundDown(TimeOnly.FromDateTime(DateTime.Now), LastSlotRoundingMinutes) // still running today
+                : new TimeOnly(22, 0); // Default to 10 PM if no shutdown
 
 		// Meetings, browser ticket blocks and the lunch break are fixed blocks; work slots fill the gaps between them
 		var fixedBlocks = ExtractCalendarMeetings(sortedEvents, workStart, workEnd);
@@ -297,16 +306,20 @@ public class EventToTimeSpanConverter
 
 		// Automatically merge consecutive work slots that share the same ticket number
 		timeSlots = MergeConsecutiveSameTicketSlots(timeSlots);
+		timeSlots = RemoveOffPeriods(timeSlots, offPeriods);
 
-        // Apply location to all slots based on homeoffice day or default
-        var defaultLocation = _appConfig?.DefaultLocation == "WV" ? Location.WV : Location.HOME;
-        var location = isHomeofficeDay ? Location.HOME : defaultLocation;
+		// Apply location to all slots based on homeoffice day or default
+		var defaultLocation = _appConfig?.DefaultLocation ?? Location.WV;
+		var location = isHomeofficeDay ? Location.HOME : defaultLocation;
 
-        // Update timeslots with location
-        foreach (var slot in timeSlots)
-        {
-            slot.Location = location;
-        }
+		// After an off period (e.g. shut down in the office, started again in the evening) the user works from home
+		var homeFrom = offPeriods.Count > 0 ? offPeriods[0].End : (TimeOnly?)null;
+
+		// Update timeslots with location
+		foreach (var slot in timeSlots)
+		{
+			slot.Location = homeFrom != null && slot.StartTime >= homeFrom ? Location.HOME : location;
+		}
 
         if (isHomeofficeDay)
         {
@@ -315,6 +328,32 @@ public class EventToTimeSpanConverter
 
         Log.Information("Converted {EventCount} events into {SlotCount} time slots", events.Count, timeSlots.Count);
         return timeSlots;
+    }
+
+    /// <summary>
+    /// Cut the periods where the machine was off out of the slots, splitting slots that span an off period
+    /// </summary>
+    private static List<TimeSlot> RemoveOffPeriods(List<TimeSlot> timeSlots, List<(TimeOnly Start, TimeOnly End)> offPeriods)
+    {
+        if (offPeriods.Count == 0)
+            return timeSlots;
+
+        var result = new List<TimeSlot>();
+        foreach (var slot in timeSlots)
+        {
+            var pieces = new List<TimeSlot> { slot };
+            foreach (var (offStart, offEnd) in offPeriods)
+            {
+                pieces = pieces.SelectMany(p => p.EndTime <= offStart || p.StartTime >= offEnd
+                    ? [p]
+                    : new[] { p with { EndTime = offStart }, p with { StartTime = offEnd } }
+                        .Where(x => x.StartTime < x.EndTime)).ToList();
+            }
+            result.AddRange(pieces);
+        }
+
+        Log.Information("Removed {Count} off period(s) from time slots", offPeriods.Count);
+        return result;
     }
 
     private record CalendarMeeting(TimeOnly Start, TimeOnly End, string Subject, TimeSlotCategory Category, string? TicketNumber = null);
@@ -384,7 +423,7 @@ public class EventToTimeSpanConverter
             if (end > workEnd)
                 end = workEnd;
 
-            var ticketNumber = startEvent.Metadata?.GetValueOrDefault("TicketNumber");
+            var ticketNumber = GetTicketNumber(startEvent);
             meetings.Add(new CalendarMeeting(start, end, startEvent.Description ?? "Meeting", TimeSlotCategoryExtensions.ParseEventType(startEvent.EventType), ticketNumber));
         }
 
@@ -487,6 +526,9 @@ public class EventToTimeSpanConverter
             var current = sorted[idx];
             var isBreak = current.Category == TimeSlotCategory.Break;
             var isFlexible = IsFlexibleTicketSlot(current.Category);
+            var nextFixed = isBreak ? null : sorted
+                .Skip(idx + 1)
+                .FirstOrDefault(m => !IsFlexibleTicketSlot(m.Category) && m.Category != TimeSlotCategory.Break);
 
             TimeOnly start;
             TimeOnly end;
@@ -503,11 +545,6 @@ public class EventToTimeSpanConverter
                 // the next fixed (Outlook) meeting — cap end at that meeting's start instead.
                 start = current.Start < previousEnd ? previousEnd : current.Start;
                 end = current.End;
-
-                // Look ahead: find the nearest following fixed meeting that this slot would overlap
-                var nextFixed = sorted
-                    .Skip(idx + 1)
-                    .FirstOrDefault(m => !IsFlexibleTicketSlot(m.Category) && m.Category != TimeSlotCategory.Break);
 
                 if (nextFixed != null && end > nextFixed.Start)
                 {
@@ -529,11 +566,6 @@ public class EventToTimeSpanConverter
                 // meetings overlap each other the earlier one is truncated at the later one's start.
                 start = current.Start;
                 end = current.End;
-
-                // Look ahead: if the next fixed meeting starts before this one ends, truncate here
-                var nextFixed = sorted
-                    .Skip(idx + 1)
-                    .FirstOrDefault(m => !IsFlexibleTicketSlot(m.Category) && m.Category != TimeSlotCategory.Break);
 
                 if (nextFixed != null && end > nextFixed.Start)
                 {
@@ -571,7 +603,7 @@ public class EventToTimeSpanConverter
 		// is a better match than the branch that happened to be checked out at slot time.
 		var laterEvents = workEvents.Where(e => TimeOnly.FromDateTime(e.Timestamp) >= end).OrderBy(e => e.Timestamp).ToList();
 		var ticket = GetTicketFromEvents(slotEvents)
-			?? laterEvents.Select(e => GetTicketFromEvents([e])).FirstOrDefault(t => t != null)
+			?? laterEvents.Select(GetTicketNumber).FirstOrDefault(t => t != null)
 			?? GetTicketForTimeFromBranchHistory(slotTime, branchHistory)
 			?? GetTicketFromEvents(workEvents);
 
@@ -739,14 +771,9 @@ public class EventToTimeSpanConverter
     {
         TimeSlotCategory.Startup => "Windows",
         TimeSlotCategory.Work => "Git",
-        TimeSlotCategory.Meeting => "Outlook",
+        TimeSlotCategory.Meeting or TimeSlotCategory.Homeoffice or TimeSlotCategory.Urlaub or TimeSlotCategory.Zeitausgleich => "Outlook",
         TimeSlotCategory.Break => "System",
-        TimeSlotCategory.RedmineTickets => "Edge Browser",
-        TimeSlotCategory.TfsWork => "Edge Browser",
-        TimeSlotCategory.Homeoffice => "Outlook",
-        TimeSlotCategory.Urlaub => "Outlook",
-        TimeSlotCategory.Zeitausgleich => "Outlook",
-        TimeSlotCategory.Other => "Unknown",
+        TimeSlotCategory.RedmineTickets or TimeSlotCategory.TfsWork => "Edge Browser",
         _ => "Unknown"
     };
 
