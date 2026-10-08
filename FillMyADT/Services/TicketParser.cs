@@ -12,7 +12,7 @@ public static class TicketParser
     // Matches #12345 (exactly 5 digits) in commit messages, branch names, and page titles.
     // Group 1 captures only the digits.
     private static readonly Regex GitPattern =
-        new(@"#(\d{5})", RegexOptions.Compiled);
+        new(@"#(\d{5})(?!\d)", RegexOptions.Compiled);
 
     // URL patterns for ticket extraction from browser history.
     // TFS URLs are intentionally excluded: the numbers in TFS URLs are internal TFS identifiers,

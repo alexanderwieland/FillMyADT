@@ -1,6 +1,4 @@
-@page "/"
-@using FillMyADT.Services
-@using FillMyADT.Models
+﻿@page "/"
 @inject EventAggregatorService EventAggregator
 @inject EventToTimeSpanConverter TimeSlotConverter
 @inject AdtXmlExportService AdtExportService
@@ -15,7 +13,7 @@
     <div class="controls">
         <!-- Date Navigation Section -->
         <div class="date-section">
-            <button class="nav-arrow" @onclick="LoadPreviousDayAsync" title="Previous Day">
+            <button class="nav-arrow" @onclick="() => LoadDateAsync(selectedDate.AddDays(-1))" title="Previous Day">
                 ◀
             </button>
             <input type="date"
@@ -23,11 +21,11 @@
                    @bind:after="LoadEventsAsync"
                    max="@DateTime.Today.ToString("yyyy-MM-dd")"
                    class="date-input" />
-            <button class="nav-arrow" @onclick="LoadNextDayAsync" title="Next Day" disabled="@(selectedDate >= DateTime.Today)">
+            <button class="nav-arrow" @onclick="() => LoadDateAsync(selectedDate.AddDays(1))" title="Next Day" disabled="@(selectedDate >= DateTime.Today)">
                 ▶
             </button>
-            <button class="quick-date-btn" @onclick="LoadYesterdayAsync" title="Yesterday">Yesterday</button>
-            <button class="quick-date-btn" @onclick="LoadTodayAsync" title="Today">Today</button>
+            <button class="quick-date-btn" @onclick="() => LoadDateAsync(DateTime.Today.AddDays(-1))" title="Yesterday">Yesterday</button>
+            <button class="quick-date-btn" @onclick="() => LoadDateAsync(DateTime.Today)" title="Today">Today</button>
         </div>
 
         <!-- Action Buttons -->
@@ -35,13 +33,13 @@
             <button class="btn btn-refresh" @onclick="LoadEventsAsync" disabled="@isLoading">
                 @(isLoading ? "Loading..." : "🔄 Refresh")
             </button>
-            <button class="btn btn-copy" @onclick="CopyEventsAsync" disabled="@(events == null || !events.Any())" title="Copy Events to Clipboard">
+            <button class="btn btn-copy" @onclick="CopyEventsAsync" disabled="@(events.Count == 0)" title="Copy Events to Clipboard">
                 📋 Copy Events
             </button>
-            <button class="btn btn-copy" @onclick="CopyTimeSlotsAsync" disabled="@(timeSlots == null || !timeSlots.Any())" title="Copy Time Slots to Clipboard">
+            <button class="btn btn-copy" @onclick="CopyTimeSlotsAsync" disabled="@(timeSlots.Count == 0)" title="Copy Time Slots to Clipboard">
                 ⏱️ Copy Slots
             </button>
-            <button class="btn btn-export" @onclick="ExportToAdtAsync" disabled="@(timeSlots == null || !timeSlots.Any())" title="Export to ADT XML">
+            <button class="btn btn-export" @onclick="ExportToAdtAsync" disabled="@(timeSlots.Count == 0)" title="Export to ADT XML">
                 📤 Export to ADT
             </button>
         </div>
@@ -62,13 +60,13 @@
     }
 
     <div class="view-switcher">
-        <button class="view-btn @(currentView == ViewMode.Events ? "active" : "")" @onclick="() => SwitchView(ViewMode.Events)">
+        <button class="view-btn @(currentView == ViewMode.Events ? "active" : "")" @onclick="() => currentView = ViewMode.Events">
             📋 Events
         </button>
-        <button class="view-btn @(currentView == ViewMode.TimeSlots ? "active" : "")" @onclick="() => SwitchView(ViewMode.TimeSlots)">
+        <button class="view-btn @(currentView == ViewMode.TimeSlots ? "active" : "")" @onclick="() => currentView = ViewMode.TimeSlots">
             ⏱️ Time Slots
         </button>
-        <button class="view-btn @(currentView == ViewMode.ExportPreview ? "active" : "")" @onclick="() => SwitchView(ViewMode.ExportPreview)">
+        <button class="view-btn @(currentView == ViewMode.ExportPreview ? "active" : "")" @onclick="() => currentView = ViewMode.ExportPreview">
             📤 Export Preview
         </button>
     </div>
@@ -87,18 +85,18 @@
             ExportEntries="@exportPreview"
             IsLoading="@isLoading"
             ExcludedCount="@excludedCount"
-            OnMergeAbove="@MergeWithAbove"
-            OnMergeBelow="@MergeWithBelow" />
+            OnMergeAbove="@(e => MergeAdjacent(e, -1))"
+            OnMergeBelow="@(e => MergeAdjacent(e, 1))" />
     }
 </div>
 
 @code {
     private enum ViewMode { Events, TimeSlots, ExportPreview }
 
-    private DateTime selectedDate = DateTime.Today.AddDays(-1); // Start with yesterday
-    private IReadOnlyList<Event>? events;
-    private IReadOnlyList<TimeSlot>? timeSlots;
-    private IReadOnlyList<AdtExportEntry>? exportPreview;
+    private DateTime selectedDate = DateTime.Today.AddDays(-1);
+    private IReadOnlyList<Event> events = [];
+    private IReadOnlyList<TimeSlot> timeSlots = [];
+    private IReadOnlyList<AdtExportEntry> exportPreview = [];
     private int excludedCount;
     private IEnumerable<string>? availableSources;
     private bool isLoading;
@@ -108,20 +106,16 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await LoadAvailableSourcesAsync();
-        await LoadEventsAsync();
-    }
-
-    private async Task LoadAvailableSourcesAsync()
-    {
         try
         {
             availableSources = await EventAggregator.GetAvailableSourcesAsync();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error loading sources: {ex.Message}");
+            errorMessage = $"Error loading sources: {ex.Message}";
         }
+
+        await LoadEventsAsync();
     }
 
     private async Task LoadEventsAsync()
@@ -129,7 +123,6 @@
         _loadCancellationTokenSource?.Cancel();
         _loadCancellationTokenSource?.Dispose();
         _loadCancellationTokenSource = new CancellationTokenSource();
-
         var cancellationToken = _loadCancellationTokenSource.Token;
 
         isLoading = true;
@@ -139,34 +132,20 @@
         try
         {
             events = await EventAggregator.GetEventsForDayAsync(selectedDate, cancellationToken);
-
-            // Convert events to time slots
-            if (events != null && events.Any())
-            {
-                timeSlots = await TimeSlotConverter.ConvertEventsToTimeSlotsAsync(events, cancellationToken);
-
-                // Generate export preview
-                exportPreview = AdtExportService.GetExportPreview(timeSlots, selectedDate);
-                excludedCount = timeSlots.Count(ts => ts.Category == TimeSlotCategory.Break);
-            }
-            else
-            {
-                timeSlots = Array.Empty<TimeSlot>();
-                exportPreview = Array.Empty<AdtExportEntry>();
-                excludedCount = 0;
-            }
+            SetTimeSlots(events.Count > 0
+                ? await TimeSlotConverter.ConvertEventsToTimeSlotsAsync(events, cancellationToken)
+                : []);
         }
         catch (OperationCanceledException)
         {
-            // Cancelled - don't show error
+            // Superseded by a newer load
         }
         catch (Exception ex)
         {
+            Serilog.Log.Error(ex, "Error loading events for {Date}", selectedDate);
             errorMessage = $"Error loading events: {ex.Message}";
-            events = Array.Empty<Event>();
-            timeSlots = Array.Empty<TimeSlot>();
-            exportPreview = Array.Empty<AdtExportEntry>();
-            excludedCount = 0;
+            events = [];
+            SetTimeSlots([]);
         }
         finally
         {
@@ -178,65 +157,30 @@
         }
     }
 
-    private async Task LoadTodayAsync()
+    private void SetTimeSlots(IReadOnlyList<TimeSlot> slots)
     {
-        selectedDate = DateTime.Today;
-        await LoadEventsAsync();
+        timeSlots = slots;
+        exportPreview = AdtExportService.GetExportPreview(timeSlots, selectedDate);
+        excludedCount = timeSlots.Count(ts => ts.Category == TimeSlotCategory.Break);
     }
 
-    private async Task LoadYesterdayAsync()
+    private Task LoadDateAsync(DateTime date)
     {
-        selectedDate = DateTime.Today.AddDays(-1);
-        await LoadEventsAsync();
+        selectedDate = date > DateTime.Today ? DateTime.Today : date;
+        return LoadEventsAsync();
     }
 
-    private async Task LoadPreviousDayAsync()
-    {
-        selectedDate = selectedDate.AddDays(-1);
-        await LoadEventsAsync();
-    }
+    private Task CopyEventsAsync() => CopyToClipboardAsync(ClipboardFormatter.FormatEvents(events, selectedDate));
 
-    private async Task LoadNextDayAsync()
-    {
-        if (selectedDate < DateTime.Today)
-        {
-            selectedDate = selectedDate.AddDays(1);
-            await LoadEventsAsync();
-        }
-    }
+    private Task CopyTimeSlotsAsync() => CopyToClipboardAsync(ClipboardFormatter.FormatTimeSlots(timeSlots, selectedDate));
 
-    private void SwitchView(ViewMode mode)
+    private async Task CopyToClipboardAsync(string text)
     {
-        currentView = mode;
-    }
-
-    private async Task CopyEventsAsync()
-    {
-        if (events == null || !events.Any())
-            return;
-
         try
         {
-            var text = ClipboardFormatter.FormatEvents(events, selectedDate);
             await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", text);
         }
-        catch (Exception ex)
-        {
-            errorMessage = $"Failed to copy to clipboard: {ex.Message}";
-        }
-    }
-
-    private async Task CopyTimeSlotsAsync()
-    {
-        if (timeSlots == null || !timeSlots.Any())
-            return;
-
-        try
-        {
-            var text = ClipboardFormatter.FormatTimeSlots(timeSlots, selectedDate);
-            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", text);
-        }
-        catch (Exception ex)
+        catch (JSException ex)
         {
             errorMessage = $"Failed to copy to clipboard: {ex.Message}";
         }
@@ -244,77 +188,47 @@
 
     private async Task ExportToAdtAsync()
     {
-        if (timeSlots == null || !timeSlots.Any())
-            return;
-
         try
         {
             var filePath = await AdtExportService.ExportToXmlAsync(timeSlots, selectedDate);
             errorMessage = $"✅ Exported to: {filePath}";
-            Console.WriteLine($"Successfully exported to ADT: {filePath}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to export to ADT: {ex.Message}");
             errorMessage = $"Failed to export: {ex.Message}";
         }
     }
 
-    private void MergeWithAbove(AdtExportEntry entry)
+    /// <summary>
+    /// Merge the time slot of an export entry with its neighbour (-1 = above, 1 = below).
+    /// </summary>
+    private void MergeAdjacent(AdtExportEntry entry, int direction)
     {
-        if (timeSlots == null || exportPreview == null) return;
+        var index = exportPreview.ToList().IndexOf(entry);
+        var neighbourIndex = index + direction;
+        if (index < 0 || neighbourIndex < 0 || neighbourIndex >= exportPreview.Count)
+            return;
 
-        var currentIndex = exportPreview.ToList().IndexOf(entry);
-        if (currentIndex <= 0) return; // Can't merge with above if first item
+        var first = exportPreview[Math.Min(index, neighbourIndex)].TimeSlot;
+        var second = exportPreview[Math.Max(index, neighbourIndex)].TimeSlot;
 
-        var aboveEntry = exportPreview[currentIndex - 1];
-        MergeTimeSlots(aboveEntry.TimeSlot, entry.TimeSlot);
-    }
+        var slots = timeSlots.ToList();
+        var firstIndex = slots.IndexOf(first);
+        var secondIndex = slots.IndexOf(second);
+        if (firstIndex < 0 || secondIndex < 0)
+            return;
 
-    private void MergeWithBelow(AdtExportEntry entry)
-    {
-        if (timeSlots == null || exportPreview == null) return;
-
-        var currentIndex = exportPreview.ToList().IndexOf(entry);
-        if (currentIndex < 0 || currentIndex >= exportPreview.Count - 1) return; // Can't merge with below if last item
-
-        var belowEntry = exportPreview[currentIndex + 1];
-        MergeTimeSlots(entry.TimeSlot, belowEntry.TimeSlot);
-    }
-
-    private void MergeTimeSlots(TimeSlot first, TimeSlot second)
-    {
-        if (timeSlots == null) return;
-
-        // Create merged time slot
         var merged = first with
         {
             EndTime = second.EndTime,
-            Text = string.IsNullOrEmpty(first.Text) ? second.Text : first.Text, // Keep first text if available
-            TicketNr = string.IsNullOrEmpty(first.TicketNr) ? second.TicketNr : first.TicketNr // Keep first ticket if available
+            Text = string.IsNullOrEmpty(first.Text) ? second.Text : first.Text,
+            TicketNr = string.IsNullOrEmpty(first.TicketNr) ? second.TicketNr : first.TicketNr
         };
 
-        // Rebuild timeSlots list with merged slot
-        var slotsList = timeSlots.ToList();
-        var firstIndex = slotsList.IndexOf(first);
-        var secondIndex = slotsList.IndexOf(second);
-
-        if (firstIndex >= 0 && secondIndex >= 0)
-        {
-            // Remove both original slots
-            slotsList.RemoveAt(Math.Max(firstIndex, secondIndex)); // Remove higher index first
-            slotsList.RemoveAt(Math.Min(firstIndex, secondIndex));
-
-            // Insert merged slot at the position of the first slot
-            slotsList.Insert(Math.Min(firstIndex, secondIndex), merged);
-
-            // Update timeSlots and regenerate export preview
-            timeSlots = slotsList;
-            exportPreview = AdtExportService.GetExportPreview(timeSlots, selectedDate);
-            excludedCount = timeSlots.Count(ts => ts.Category == TimeSlotCategory.Break);
-
-            StateHasChanged();
-        }
+        slots.RemoveAt(Math.Max(firstIndex, secondIndex));
+        slots.RemoveAt(Math.Min(firstIndex, secondIndex));
+        slots.Insert(Math.Min(firstIndex, secondIndex), merged);
+        SetTimeSlots(slots);
     }
 
     public void Dispose()
@@ -323,3 +237,4 @@
         _loadCancellationTokenSource?.Dispose();
     }
 }
+

@@ -1,4 +1,4 @@
-using FillMyADT.Models;
+﻿using FillMyADT.Models;
 using FillMyADT.Models.Configuration;
 using Serilog;
 using System.Runtime.InteropServices;
@@ -129,6 +129,7 @@ public class OutlookEventSource : IEventSource
                     //   - Start is before end of Jan 15 (i.e., before start of Jan 16)
                     //   - End is after start of Jan 15
                     var endDateNextDay = endDate.Date.AddDays(1); // Start of next day
+                    // Outlook's Restrict parses dates with the system locale, so current-culture "g" is intended here
                     var filter = $"[Start] < '{endDateNextDay:g}' AND [End] > '{startDate:g}'";
                     var restrictedItems = items.Restrict(filter);
 
@@ -178,6 +179,16 @@ public class OutlookEventSource : IEventSource
 
                             if (isAllDay && !_config.IncludeAllDayEvents)
                                 continue;
+
+                            // Skip cancelled meetings (olMeetingCanceled=5, olMeetingReceivedAndCanceled=7)
+                            // and meetings the user declined (olResponseDeclined=4)
+                            int meetingStatus = item.MeetingStatus;
+                            int responseStatus = item.ResponseStatus;
+                            if (meetingStatus is 5 or 7 || responseStatus == 4)
+                            {
+                                Log.Debug("Skipping cancelled/declined meeting: {Subject}", subject);
+                                continue;
+                            }
 
                             var duration = itemEnd - itemStart;
                             if (duration.TotalMinutes < _config.MinimumDurationMinutes)
@@ -264,7 +275,7 @@ public class OutlookEventSource : IEventSource
                         Marshal.ReleaseComObject(outlook);
                 }
 
-                Log.Information("Retrieved {Count} calendar events from Outlook via COM", events.Count / 2);
+                Log.Information("Retrieved {Count} calendar events from Outlook via COM", events.Count(e => e.EventType != EventType.CalendarMeetingEnd));
             }
             catch (COMException ex)
             {

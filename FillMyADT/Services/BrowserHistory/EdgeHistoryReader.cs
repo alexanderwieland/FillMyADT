@@ -72,7 +72,7 @@ internal class EdgeHistoryReader
         var startTimestamp = DateTimeToChromiumTimestamp(startDate);
         var endTimestamp = DateTimeToChromiumTimestamp(endDate);
 
-        var connectionString = $"Data Source={dbPath};Mode=ReadOnly";
+        var connectionString = $"Data Source={dbPath};Mode=ReadOnly;Pooling=False";
 
         await using var connection = new SqliteConnection(connectionString);
         await connection.OpenAsync(cancellationToken);

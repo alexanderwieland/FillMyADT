@@ -62,23 +62,6 @@ public enum TimeSlotCategory
 public static class TimeSlotCategoryExtensions
 {
     /// <summary>
-    /// Get display name for category
-    /// </summary>
-    public static string GetDisplayName(this TimeSlotCategory category) => category switch
-    {
-        TimeSlotCategory.Startup => "Startup",
-        TimeSlotCategory.Work => "Work",
-        TimeSlotCategory.Meeting => "Meeting",
-        TimeSlotCategory.Break => "Break",
-        TimeSlotCategory.RedmineTickets => "Redmine Tickets",
-        TimeSlotCategory.TfsWork => "TFS Work",
-        TimeSlotCategory.Homeoffice => "Home Office",
-        TimeSlotCategory.Urlaub => "Holiday",
-        TimeSlotCategory.Other => "Other",
-        _ => category.ToString()
-    };
-
-    /// <summary>
     /// Get CSS class name for styling
     /// </summary>
     public static string GetCssClass(this TimeSlotCategory category) => category switch
@@ -91,37 +74,20 @@ public static class TimeSlotCategoryExtensions
         TimeSlotCategory.TfsWork => "category-tfs",
         TimeSlotCategory.Homeoffice => "category-homeoffice",
         TimeSlotCategory.Urlaub => "category-holiday",
-        TimeSlotCategory.Other => "category-default",
         _ => "category-default"
     };
 
-    public static TimeSlotCategory ParseEventType(EventType eventType) =>
-     eventType switch
-     {
-         EventType.Boot => TimeSlotCategory.Startup,
-         EventType.Shutdown => TimeSlotCategory.Work, // oder Other? Je nach Logik
-
-         EventType.CalendarMeetingStart => TimeSlotCategory.Meeting,
-         EventType.CalendarMeetingEnd => TimeSlotCategory.Meeting,
-
-         EventType.TicketStart => TimeSlotCategory.RedmineTickets,
-         EventType.TicketEnd => TimeSlotCategory.RedmineTickets,
-
-         EventType.LunchBreakStart => TimeSlotCategory.Break,
-         EventType.LunchBreakEnd => TimeSlotCategory.Break,
-
-         EventType.SpecialWholeDayHoliday => TimeSlotCategory.Urlaub,
-         EventType.SpecialWholeDayZeitausgleich => TimeSlotCategory.Zeitausgleich,
-         EventType.SpecialWholeDayHomeoffice => TimeSlotCategory.Homeoffice,
-
-         EventType.ReviewStart => TimeSlotCategory.TfsWork,
-         EventType.ReviewEnd => TimeSlotCategory.TfsWork,
-
-         EventType.BranchSwitch => TimeSlotCategory.Work,
-         EventType.Commit => TimeSlotCategory.Work,
-
-         EventType.None => TimeSlotCategory.Other,
-
-         _ => TimeSlotCategory.Other
-     };
+    public static TimeSlotCategory ParseEventType(EventType eventType) => eventType switch
+    {
+        EventType.Boot => TimeSlotCategory.Startup,
+        EventType.Shutdown or EventType.BranchSwitch or EventType.Commit => TimeSlotCategory.Work,
+        EventType.CalendarMeetingStart or EventType.CalendarMeetingEnd => TimeSlotCategory.Meeting,
+        EventType.TicketStart or EventType.TicketEnd => TimeSlotCategory.RedmineTickets,
+        EventType.LunchBreakStart or EventType.LunchBreakEnd => TimeSlotCategory.Break,
+        EventType.SpecialWholeDayHoliday => TimeSlotCategory.Urlaub,
+        EventType.SpecialWholeDayZeitausgleich => TimeSlotCategory.Zeitausgleich,
+        EventType.SpecialWholeDayHomeoffice => TimeSlotCategory.Homeoffice,
+        EventType.ReviewStart or EventType.ReviewEnd => TimeSlotCategory.TfsWork,
+        _ => TimeSlotCategory.Other
+    };
 }

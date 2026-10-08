@@ -6,311 +6,79 @@ using System.Diagnostics;
 namespace FillMyADT.Services.EventSources;
 
 /// <summary>
-/// Event source that reads Windows Event Log to create daily skeleton structure:
-/// 1. Morning boot time
-/// 2. Lunch break start (12:00 PM fixed)
-/// 3. Lunch break end (12:30 PM fixed)
-/// 4. Evening shutdown time
-/// These skeleton events define the structure of the day. Git and Outlook events fill the gaps.
+/// Event source that reads the Windows System event log to create the daily skeleton:
+/// work start, lunch break and work end. It builds "awake" intervals from sleep/wake
+/// transitions, ignores very short wake-ups (notifications, maintenance) and derives:
+/// - work start = start of the first meaningful awake interval
+/// - work end   = end of the last meaningful awake interval (none while the machine is still on)
+/// - lunch      = the longest idle gap starting between 11:00 and 14:00 (min 30 min logged)
+/// Git and Outlook events fill the gaps.
 /// </summary>
 public class WindowsEventSource : IEventSource
 {
-    private readonly WindowsEventSourceConfig _config;
-
     private static readonly ILogger Log = Serilog.Log.ForContext<WindowsEventSource>();
 
+    private const string KernelPower = "Microsoft-Windows-Kernel-Power";
+    private const string KernelGeneral = "Microsoft-Windows-Kernel-General";
+    private const string PowerTroubleshooter = "Microsoft-Windows-Power-Troubleshooter";
+    private const string DateTimeFormat = "yyyy-MM-dd HH:mm:ss";
+
+    private static readonly TimeSpan DayStart = TimeSpan.FromHours(6);
+    // Awake periods shorter than this
+    private static readonly TimeSpan MinAwake = TimeSpan.FromMinutes(5);
+    // Idle gaps shorter than this are not considered a lunch break
+    private static readonly TimeSpan MinLunchIdle = TimeSpan.FromMinutes(10);
+    private const int MinBreakMinutes = 30;
+    private const int MaxBreakMinutes = 60;
+
+    private readonly WindowsEventSourceConfig _config;
+
     public string Name => "Windows Events";
-
-    // Track boot and shutdown events using Kernel-General and Kernel-Power events
-    private static readonly Dictionary<(long EventId, string Provider), (string EventType, string Category)> PowerEventIds = new()
-    {
-        // Boot events from Kernel-General
-        { (1, "Microsoft-Windows-Kernel-General"), ("Boot", "System boot (cold start)") },
-        { (12, "Microsoft-Windows-Kernel-General"), ("Boot", "System resume from hibernation") },
-
-        // Shutdown events from Kernel-Power
-        { (107, "Microsoft-Windows-Kernel-Power"), ("Shutdown", "System shutdown initiated") },
-        { (42, "Microsoft-Windows-Kernel-Power"), ("Shutdown", "System entering sleep") },
-        { (109, "Microsoft-Windows-Kernel-Power"), ("Shutdown", "System entering hibernation") }
-    };
 
     public WindowsEventSource(WindowsEventSourceConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
         _config = config;
-        Log.Information("WindowsEventSource initialized - creating daily skeleton (Boot/Lunch/Shutdown)");
     }
 
-    public async Task<IEnumerable<Event>> GetEventsAsync(DateTime startDate, DateTime endDate, CancellationToken cancellationToken = default)
+    public Task<IEnumerable<Event>> GetEventsAsync(DateTime startDate, DateTime endDate, CancellationToken cancellationToken = default)
     {
         if (!_config.IsEnabled)
-        {
-            Log.Debug("WindowsEventSource is disabled");
-            return [];
-        }
+            return Task.FromResult<IEnumerable<Event>>([]);
 
-        return await Task.Run(() =>
+        return Task.Run<IEnumerable<Event>>(() =>
         {
             var events = new List<Event>();
 
             try
             {
                 using var systemLog = new EventLog("System");
-
-                // Get boot and shutdown events
-                var systemEvents = ReadBootShutdownEvents(systemLog, startDate, endDate, cancellationToken).ToList();
-                events.AddRange(systemEvents);
-
-                // Add lunch break skeleton events for each day that has boot or shutdown events
-                var daysWithEvents = systemEvents
-                    .Select(e => e.Timestamp.Date)
-                    .Distinct()
-                    .OrderBy(d => d)
+                var transitions = systemLog.Entries.Cast<EventLogEntry>()
+                    .Where(e => e.TimeGenerated >= startDate && e.TimeGenerated <= endDate)
+                    .Select(e => (Entry: e, Kind: Classify(e)))
+                    .Where(t => t.Kind != Transition.None)
                     .ToList();
 
-                Log.Debug("Processing lunch breaks for {DayCount} unique days", daysWithEvents.Count);
-
-                foreach (var date in daysWithEvents)
+                foreach (var day in transitions.GroupBy(t => t.Entry.TimeGenerated.Date).OrderBy(g => g.Key))
                 {
-                    Log.Debug("Processing lunch break for date: {Date}", date.ToShortDateString());
-
-                    // Find first Kernel-Power event after 11:00 AM (likely lunch break)
-                    var lunchTimeCandidate = FindLunchBreakTime(systemLog, date);
-
-                    if (lunchTimeCandidate.HasValue)
-                    {
-                        var originalTime = lunchTimeCandidate.Value;
-                        var lunchStart = RoundToNextQuarterHour(originalTime);
-                        var lunchEnd = lunchStart.AddMinutes(30);
-
-                        Log.Debug("Detected lunch break for {Date}: {Start} - {End} (from event at {Original})",
-                            date.ToShortDateString(), lunchStart.ToString("HH:mm"), lunchEnd.ToString("HH:mm"), originalTime.ToString("HH:mm"));
-
-                        Log.Information("Adding lunch break events for {Date}: Start={Start}, End={End}",
-                            date.ToShortDateString(), lunchStart.ToString("yyyy-MM-dd HH:mm:ss"), lunchEnd.ToString("yyyy-MM-dd HH:mm:ss"));
-
-                        events.Add(new Event
-                        {
-                            Source = Name,
-                            Timestamp = lunchStart,
-                            EventType = EventType.LunchBreakStart,
-                            Description = "Lunch break begins (detected from system activity)",
-                            Metadata = new Dictionary<string, string>
-                            {
-                                ["OriginalTime"] = originalTime.ToString("yyyy-MM-dd HH:mm:ss"),
-                                ["RoundedTime"] = lunchStart.ToString("yyyy-MM-dd HH:mm:ss"),
-                                ["DetectionMethod"] = "Kernel-Power event"
-                            }
-                        });
-
-                        events.Add(new Event
-                        {
-                            Source = Name,
-                            Timestamp = lunchEnd,
-                            EventType = EventType.LunchBreakEnd,
-                            Description = "Lunch break ends",
-                            Metadata = new Dictionary<string, string>
-                            {
-                                ["OriginalTime"] = originalTime.ToString("yyyy-MM-dd HH:mm:ss"),
-                                ["RoundedTime"] = lunchStart.ToString("yyyy-MM-dd HH:mm:ss"),
-                                ["Duration"] = "30 minutes"
-                            }
-                        });
-                    }
-                    else
-                    {
-                        // Fallback to default 12:00-12:30 if no lunch event detected
-                        Log.Debug("No lunch break detected for {Date}, using default 12:00-12:30", date.ToShortDateString());
-
-                        Log.Information("Adding default lunch break events for {Date}: Start=12:00, End=12:30", date.ToShortDateString());
-
-                        events.Add(new Event
-                        {
-                            Source = Name,
-                            Timestamp = new DateTime(date.Year, date.Month, date.Day, 12, 0, 0),
-                            EventType = EventType.LunchBreakStart,
-                            Description = "Lunch break begins (default time)"
-                        });
-
-                        events.Add(new Event
-                        {
-                            Source = Name,
-                            Timestamp = new DateTime(date.Year, date.Month, date.Day, 12, 30, 0),
-                            EventType = EventType.LunchBreakEnd,
-                            Description = "Lunch break ends"
-                        });
-                    }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    // Ignore night-time activity (updates, maintenance wake-ups) before 06:00
+                    var dayTransitions = day
+                        .Where(t => t.Entry.TimeGenerated.TimeOfDay >= DayStart)
+                        .OrderBy(t => t.Entry.TimeGenerated)
+                        .ToList();
+                    events.AddRange(CreateDayEvents(day.Key, dayTransitions));
                 }
 
-                Log.Information("Found {EventCount} daily skeleton events (Boot/Lunch Start/Lunch End/Shutdown)", events.Count);
+                Log.Information("Found {EventCount} daily skeleton events (Boot/Lunch/Shutdown)", events.Count);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 Log.Error(ex, "Error reading System event log");
             }
 
             return events.OrderBy(e => e.Timestamp).ToList();
         }, cancellationToken);
-    }
-
-    private IEnumerable<Event> ReadBootShutdownEvents(EventLog eventLog, DateTime startDate, DateTime endDate, CancellationToken cancellationToken)
-    {
-        var events = new List<Event>();
-
-        try
-        {
-            var allEntries = eventLog.Entries.Cast<EventLogEntry>()
-                .Where(e => e.TimeGenerated >= startDate && e.TimeGenerated <= endDate)
-                .Where(e => IsBootOrShutdownEvent(e))
-                .Select(e => new
-                {
-                    Entry = e,
-                    Date = e.TimeGenerated.Date,
-                    Info = GetEventInfo(e)
-                })
-                .ToList();
-
-            Log.Debug("Found {TotalCount} Kernel boot/shutdown events in date range", allEntries.Count);
-
-            // Group by date and get first boot and last shutdown for each day
-            var eventsByDay = allEntries.GroupBy(e => e.Date);
-
-            foreach (var dayGroup in eventsByDay)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var date = dayGroup.Key;
-                var dayEvents = dayGroup.ToList();
-
-                var bootCount = dayEvents.Count(e => e.Info.EventType == "Boot");
-                var shutdownCount = dayEvents.Count(e => e.Info.EventType == "Shutdown");
-
-                Log.Debug("Day {Date}: {BootCount} boot events, {ShutdownCount} shutdown events",
-                    date.ToShortDateString(), bootCount, shutdownCount);
-
-                // Get first boot event of the day (morning start)
-                var firstBoot = dayEvents
-                    .Where(e => e.Info.EventType == "Boot")
-                    .OrderBy(e => e.Entry.TimeGenerated)
-                    .FirstOrDefault();
-
-                if (firstBoot != null)
-                {
-                    Log.Debug("Adding morning boot event at {Time}", firstBoot.Entry.TimeGenerated);
-                    events.Add(new Event
-                    {
-                        Source = Name,
-                        Timestamp = firstBoot.Entry.TimeGenerated,
-                        EventType = EventType.Boot,
-                        Description = firstBoot.Info.Category,
-                        Metadata = new Dictionary<string, string>
-                        {
-                            ["EventId"] = firstBoot.Entry.InstanceId.ToString(),
-                            ["Source"] = firstBoot.Entry.Source
-                        }
-                    });
-                }
-
-                // Get last shutdown event of the day (evening end)
-                var lastShutdown = dayEvents
-                    .Where(e => e.Info.EventType == "Shutdown")
-                    .OrderByDescending(e => e.Entry.TimeGenerated)
-                    .FirstOrDefault();
-
-                if (lastShutdown != null)
-                {
-                    Log.Debug("Adding evening shutdown event at {Time}", lastShutdown.Entry.TimeGenerated);
-                    events.Add(new Event
-                    {
-                        Source = Name,
-                        Timestamp = lastShutdown.Entry.TimeGenerated,
-                        EventType = EventType.Shutdown,
-                        Description = lastShutdown.Info.Category,
-                        Metadata = new Dictionary<string, string>
-                        {
-                            ["EventId"] = lastShutdown.Entry.InstanceId.ToString(),
-                            ["Source"] = lastShutdown.Entry.Source
-                        }
-                    });
-                }
-            }
-
-            Log.Debug("ReadBootShutdownEvents returning {Count} events", events.Count);
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Error reading boot/shutdown events");
-        }
-
-        return events;
-    }
-
-    private static bool IsBootOrShutdownEvent(EventLogEntry entry)
-    {
-        // For Kernel events, InstanceId equals EventID
-        var key = (entry.InstanceId, entry.Source);
-        return PowerEventIds.ContainsKey(key);
-    }
-
-    private static (string EventType, string Category) GetEventInfo(EventLogEntry entry)
-    {
-        // For Kernel events, InstanceId equals EventID
-        var key = (entry.InstanceId, entry.Source);
-        if (PowerEventIds.TryGetValue(key, out var info))
-        {
-            return info;
-        }
-
-        return ("System Event", "Unknown event");
-    }
-
-    /// <summary>
-    /// Find the first Kernel-Power event after 11:00 AM on the given date.
-    /// Any Kernel-Power event likely indicates when the user took a lunch break.
-    /// </summary>
-    private static DateTime? FindLunchBreakTime(EventLog eventLog, DateTime date)
-    {
-        try
-        {
-            var lunchWindowStart = new DateTime(date.Year, date.Month, date.Day, 11, 0, 0);
-            var lunchWindowEnd = new DateTime(date.Year, date.Month, date.Day, 14, 0, 0); // Search until 2 PM
-
-            var lunchEvent = eventLog.Entries.Cast<EventLogEntry>()
-                .Where(e => e.TimeGenerated >= lunchWindowStart && e.TimeGenerated <= lunchWindowEnd)
-                .Where(e => e.Source == "Microsoft-Windows-Kernel-Power") // Accept ANY Kernel-Power event
-                .OrderBy(e => e.TimeGenerated)
-                .FirstOrDefault();
-
-            if (lunchEvent != null)
-            {
-                Log.Debug("Found lunch break candidate: EventID {EventId} at {Time}",
-                    lunchEvent.InstanceId, lunchEvent.TimeGenerated.ToString("HH:mm:ss"));
-            }
-
-            return lunchEvent?.TimeGenerated;
-        }
-        catch (Exception ex)
-        {
-            Log.Warning(ex, "Error finding lunch break time for {Date}", date.ToShortDateString());
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Round a DateTime to the next quarter hour (00, 15, 30, 45).
-    /// Example: 11:47 → 12:00, 11:13 → 11:15, 12:00 → 12:00
-    /// </summary>
-    private static DateTime RoundToNextQuarterHour(DateTime time)
-    {
-        var minutes = time.Minute;
-        var roundedMinutes = (int)Math.Ceiling(minutes / 15.0) * 15;
-
-        if (roundedMinutes == 60)
-        {
-            return new DateTime(time.Year, time.Month, time.Day, time.Hour, 0, 0).AddHours(1);
-        }
-
-        return new DateTime(time.Year, time.Month, time.Day, time.Hour, roundedMinutes, 0);
     }
 
     public Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default)
@@ -320,8 +88,7 @@ public class WindowsEventSource : IEventSource
 
         try
         {
-            using var systemLog = new EventLog("System");
-            return Task.FromResult(true);
+            return Task.FromResult(EventLog.Exists("System"));
         }
         catch (Exception ex)
         {
@@ -329,4 +96,106 @@ public class WindowsEventSource : IEventSource
             return Task.FromResult(false);
         }
     }
+
+    private enum Transition { None, Sleep, Wake }
+
+    /// <summary>
+    /// Sleep: Kernel-Power 42 (sleep), 506 (modern standby entered), 109 (shutdown), Kernel-General 13 (OS shutdown).
+    /// Wake:  Kernel-Power 507 (modern standby exited), Power-Troubleshooter 1 (resumed), Kernel-General 12 (OS start).
+    /// Deliberately ignored: Kernel-General 1 (system time changed, fires at random times) and
+    /// Kernel-Power 107 (resume, but stamped with the suspend time).
+    /// </summary>
+    private static Transition Classify(EventLogEntry e) => (e.Source, e.InstanceId) switch
+    {
+        (KernelPower, 42 or 506 or 109) => Transition.Sleep,
+        (KernelGeneral, 13) => Transition.Sleep,
+        (KernelPower, 507) => Transition.Wake,
+        (PowerTroubleshooter, 1) => Transition.Wake,
+        (KernelGeneral, 12) => Transition.Wake,
+        _ => Transition.None
+    };
+
+    private IEnumerable<Event> CreateDayEvents(DateTime date, List<(EventLogEntry Entry, Transition Kind)> transitions)
+    {
+        // Build awake intervals. If the first transition is a sleep, the machine was already on at 06:00.
+        var awake = new List<(DateTime Start, DateTime? End)>();
+        DateTime? awakeSince = transitions.Count > 0 && transitions[0].Kind == Transition.Sleep ? date + DayStart : null;
+        foreach (var (entry, kind) in transitions)
+        {
+            if (kind == Transition.Wake && awakeSince == null)
+                awakeSince = entry.TimeGenerated;
+            else if (kind == Transition.Sleep && awakeSince != null)
+            {
+                awake.Add((awakeSince.Value, entry.TimeGenerated));
+                awakeSince = null;
+            }
+        }
+        if (awakeSince != null)
+            awake.Add((awakeSince.Value, null)); // still awake (today) or running past midnight
+
+        var dayEnd = date.AddDays(1);
+        var meaningful = awake
+            .Where(a => (a.End ?? Min(DateTime.Now, dayEnd)) - a.Start >= MinAwake)
+            .ToList();
+
+        if (meaningful.Count == 0)
+        {
+            Log.Debug("{Date}: no meaningful awake period found in System log", date.ToString("yyyy-MM-dd"));
+            yield break;
+        }
+
+        var workStart = meaningful[0].Start;
+        var workEnd = meaningful[^1].End;
+
+        yield return new Event { Source = Name, Timestamp = workStart, EventType = EventType.Boot, Description = "Machine woke up / started" };
+        if (workEnd != null)
+            yield return new Event { Source = Name, Timestamp = workEnd.Value, EventType = EventType.Shutdown, Description = "Machine went to sleep / shut down" };
+
+        // Idle gaps between meaningful awake periods; lunch is the longest one starting in the lunch window
+        var lunchGap = meaningful
+            .Zip(meaningful.Skip(1), (a, b) => (Start: a.End!.Value, End: b.Start))
+            .Where(g => g.Start >= date.AddHours(11) && g.Start <= date.AddHours(14) && g.End - g.Start >= MinLunchIdle)
+            .OrderByDescending(g => g.End - g.Start)
+            .FirstOrDefault();
+
+        Log.Debug("{Date}: {Count} awake periods, work {Start:HH:mm}-{End}, lunch idle {LunchStart}-{LunchEnd}",
+            date.ToString("yyyy-MM-dd"), meaningful.Count, workStart, workEnd?.ToString("HH:mm") ?? "(open)",
+            lunchGap == default ? "-" : lunchGap.Start.ToString("HH:mm"), lunchGap == default ? "-" : lunchGap.End.ToString("HH:mm"));
+
+        foreach (var e in CreateLunchBreakEvents(date, lunchGap == default ? null : lunchGap))
+            yield return e;
+    }
+
+    /// <summary>
+    /// Lunch is logged from the idle start (rounded to 5 minutes) for the actual idle duration,
+    /// but at least 30 and at most 60 minutes. Without a detected idle gap: 12:00-12:30.
+    /// </summary>
+    private IEnumerable<Event> CreateLunchBreakEvents(DateTime date, (DateTime Start, DateTime End)? idle)
+    {
+        if (idle == null)
+        {
+            yield return new Event { Source = Name, Timestamp = date.AddHours(12), EventType = EventType.LunchBreakStart, Description = "Lunch break begins (default time)" };
+            yield return new Event { Source = Name, Timestamp = date.AddHours(12.5), EventType = EventType.LunchBreakEnd, Description = "Lunch break ends" };
+            yield break;
+        }
+
+        var (originalStart, originalEnd) = idle.Value;
+        var lunchStart = date + TimeHelper.RoundNearest(TimeOnly.FromDateTime(originalStart), 5).ToTimeSpan();
+        var actualMinutes = (int)Math.Ceiling((originalEnd - lunchStart).TotalMinutes / 5.0) * 5;
+        var durationMinutes = Math.Clamp(actualMinutes, MinBreakMinutes, MaxBreakMinutes);
+        var lunchEnd = lunchStart.AddMinutes(durationMinutes);
+
+        var metadata = new Dictionary<string, string>
+        {
+            ["OriginalTime"] = originalStart.ToString(DateTimeFormat),
+            ["IdleUntil"] = originalEnd.ToString(DateTimeFormat),
+            ["DetectionMethod"] = "Standby gap",
+            ["Duration"] = $"{durationMinutes} minutes"
+        };
+
+        yield return new Event { Source = Name, Timestamp = lunchStart, EventType = EventType.LunchBreakStart, Description = "Lunch break begins (detected from standby)", Metadata = metadata };
+        yield return new Event { Source = Name, Timestamp = lunchEnd, EventType = EventType.LunchBreakEnd, Description = "Lunch break ends", Metadata = new Dictionary<string, string>(metadata) };
+    }
+
+    private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;
 }

@@ -46,105 +46,18 @@ namespace FillMyADT
             serviceCollection.AddBlazorWebViewDeveloperTools();
 #endif
 
-            // Register configuration service
-            var configService = new ConfigurationService();
-            serviceCollection.AddSingleton(configService);
+            var appConfig = new ConfigurationService().Load();
 
-            // Initialize default configuration if needed (synchronous for startup)
-            try
-            {
-                configService.InitializeDefaultConfigAsync().GetAwaiter().GetResult();
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to initialize default configuration");
-            }
+            serviceCollection.AddSingleton<IEventSource>(new WindowsEventSource(appConfig.GetSourceConfig<WindowsEventSourceConfig>()));
+            var gitSource = new GitEventSource(appConfig.GetSourceConfig<GitEventSourceConfig>());
+            serviceCollection.AddSingleton<IEventSource>(gitSource);
+            serviceCollection.AddSingleton<IEventSource>(new OutlookEventSource(appConfig.GetSourceConfig<OutlookEventSourceConfig>(), appConfig));
+            serviceCollection.AddSingleton<IEventSource>(new EdgeEventSource(appConfig.GetSourceConfig<EdgeEventSourceConfig>()));
 
-            // Load full application configuration
-            AppConfiguration appConfig;
-            try
-            {
-                appConfig = configService.LoadAllConfigsAsync().GetAwaiter().GetResult() ?? new AppConfiguration();
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to load application config, using defaults");
-                appConfig = new AppConfiguration();
-            }
-
-            // Load individual event source configurations with fallback to defaults
-            WindowsEventSourceConfig windowsConfig;
-            GitEventSourceConfig gitConfig;
-            OutlookEventSourceConfig outlookConfig;
-            EdgeEventSourceConfig edgeConfig;
-
-            try
-            {
-                windowsConfig = configService.LoadConfigAsync<WindowsEventSourceConfig>().GetAwaiter().GetResult()
-                    ?? new WindowsEventSourceConfig();
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to load Windows event source config, using defaults");
-                windowsConfig = new WindowsEventSourceConfig();
-            }
-
-            try
-            {
-                gitConfig = configService.LoadConfigAsync<GitEventSourceConfig>().GetAwaiter().GetResult()
-                    ?? new GitEventSourceConfig();
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to load Git event source config, using defaults");
-                gitConfig = new GitEventSourceConfig();
-            }
-
-            try
-            {
-                outlookConfig = configService.LoadConfigAsync<OutlookEventSourceConfig>().GetAwaiter().GetResult()
-                    ?? new OutlookEventSourceConfig();
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to load Outlook event source config, using defaults");
-                outlookConfig = new OutlookEventSourceConfig();
-            }
-
-            try
-            {
-                edgeConfig = configService.LoadConfigAsync<EdgeEventSourceConfig>().GetAwaiter().GetResult()
-                    ?? new EdgeEventSourceConfig();
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to load Edge event source config, using defaults");
-                edgeConfig = new EdgeEventSourceConfig();
-            }
-
-            Log.Information("Configuration loaded from {ConfigPath}", configService.ConfigDirectory);
-
-            // Register event sources with configurations
-            serviceCollection.AddSingleton<IEventSource>(sp => new WindowsEventSource(windowsConfig));
-            serviceCollection.AddSingleton<IEventSource>(sp => new GitEventSource(gitConfig));
-            serviceCollection.AddSingleton<IEventSource>(sp => new OutlookEventSource(outlookConfig, appConfig));
-            serviceCollection.AddSingleton<IEventSource>(sp => new EdgeEventSource(edgeConfig));
-
-            // Register aggregator service
             serviceCollection.AddSingleton<EventAggregatorService>();
-
-            // Register converter service with app config for location handling
-            serviceCollection.AddSingleton(sp =>
-            {
-                var gitSource = sp.GetServices<IEventSource>().OfType<GitEventSource>().FirstOrDefault();
-                return new EventToTimeSpanConverter(gitSource, appConfig);
-            });
-
-            // Register clipboard formatter
+            serviceCollection.AddSingleton(new EventToTimeSpanConverter(gitSource, appConfig));
             serviceCollection.AddSingleton<ClipboardFormatterService>();
-
-            // Register ADT XML export service with app config
-            serviceCollection.AddSingleton(sp => new AdtXmlExportService(appConfig));
+            serviceCollection.AddSingleton(new AdtXmlExportService(appConfig));
 
             return serviceCollection.BuildServiceProvider();
         }

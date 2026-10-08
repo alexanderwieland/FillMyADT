@@ -6,11 +6,6 @@ namespace FillMyADT.Models;
 public record Event
 {
     /// <summary>
-    /// Unique identifier for the event
-    /// </summary>
-    public string Id { get; init; } = Guid.NewGuid().ToString();
-
-    /// <summary>
     /// Name of the event source (e.g., "Windows Events", "Git History")
     /// </summary>
     public required string Source { get; init; }

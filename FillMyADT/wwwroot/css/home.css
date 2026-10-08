@@ -1,4 +1,4 @@
-/* Home Component Styles */
+﻿/* Home Component Styles */
 
 .home-container {
     max-width: 1200px;
@@ -23,13 +23,6 @@
     border-radius: 4px;
 }
 
-/* Centered Date Navigation */
-.date-navigation {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-}
 
 .nav-arrow {
     width: 40px;
@@ -64,83 +57,6 @@
     opacity: 0.5;
 }
 
-.date-picker-center {
-    min-width: 200px;
-}
-
-.date-picker-center .enhanced-date-input {
-    width: 100%;
-    text-align: center;
-    font-size: 16px;
-    font-weight: 600;
-}
-
-/* Date Selector (legacy - keeping for compatibility) */
-.date-selector {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 220px;
-}
-
-.date-selector label {
-    font-weight: 600;
-    color: #495057;
-    font-size: 13px;
-    margin-bottom: 2px;
-}
-
-.date-picker-wrapper {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-}
-
-.enhanced-date-input {
-    flex: 1;
-    padding: 8px 12px;
-    border: 2px solid #ced4da;
-    border-radius: 6px;
-    font-size: 14px;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    transition: all 0.2s ease;
-    background-color: white;
-    cursor: pointer;
-}
-
-.enhanced-date-input:hover {
-    border-color: #0078d4;
-}
-
-.enhanced-date-input:focus {
-    outline: none;
-    border-color: #0078d4;
-    box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.1);
-}
-
-.enhanced-date-input::-webkit-calendar-picker-indicator {
-    cursor: pointer;
-    font-size: 16px;
-    padding: 4px;
-    border-radius: 4px;
-}
-
-.enhanced-date-input::-webkit-calendar-picker-indicator:hover {
-    background-color: #f0f0f0;
-}
-
-.quick-date-buttons {
-    display: flex;
-    gap: 4px;
-}
-
-/* Quick Actions */
-.quick-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: center;
-    flex-wrap: wrap;
-}
 
 .btn {
     padding: 8px 16px;
@@ -170,13 +86,7 @@
     opacity: 0.6;
 }
 
-.btn-arrow {
-    min-width: 36px;
-    padding: 6px;
-    font-size: 14px;
-}
-
-.quick-btn {
+.quick-date-btn {
     padding: 8px 16px;
     border: 2px solid #0078d4;
     background-color: white;
@@ -188,14 +98,14 @@
     transition: all 0.2s ease;
 }
 
-.quick-btn:hover {
+.quick-date-btn:hover {
     background-color: #0078d4;
     color: white;
     transform: translateY(-1px);
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
-.quick-btn:active {
+.quick-date-btn:active {
     transform: translateY(0);
 }
 
@@ -229,16 +139,6 @@
     background-color: #f8d7da;
     border-left: 3px solid #721c24;
     color: #721c24;
-    border-radius: 3px;
-    margin-bottom: 10px;
-    font-size: 12px;
-}
-
-.success-message {
-    padding: 8px 10px;
-    background-color: #d4edda;
-    border-left: 3px solid #155724;
-    color: #155724;
     border-radius: 3px;
     margin-bottom: 10px;
     font-size: 12px;

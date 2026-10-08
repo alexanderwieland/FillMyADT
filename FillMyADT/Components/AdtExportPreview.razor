@@ -1,5 +1,3 @@
-@using FillMyADT.Models
-
 @if (IsLoading)
 {
     <div class="loading-container">
@@ -9,7 +7,7 @@
 }
 else if (ExportEntries == null || !ExportEntries.Any())
 {
-    <div class="no-exports">
+    <div class="no-events">
         <p>No entries to export for the selected date.</p>
         @if (ExcludedCount > 0)
         {
@@ -20,7 +18,7 @@ else if (ExportEntries == null || !ExportEntries.Any())
 else
 {
     <div class="export-preview">
-        <h3>ADT Export Preview (@ExportEntries.Count entries, @FormatTotalDuration(ExportEntries) total)</h3>
+        <h3>ADT Export Preview (@ExportEntries.Count entries, @TimeHelper.FormatDuration(TimeSpan.FromHours(ExportEntries.Sum(e => e.Dauer))) total)</h3>
         @if (ExcludedCount > 0)
         {
             <div class="excluded-info">
@@ -82,19 +80,6 @@ else
 
     [Parameter]
     public EventCallback<AdtExportEntry> OnMergeBelow { get; set; }
-
-    private static string FormatTotalDuration(IReadOnlyList<AdtExportEntry> entries)
-    {
-        var totalHours = entries.Sum(e => e.Dauer);
-        var hours = (int)totalHours;
-        var minutes = (int)((totalHours - hours) * 60);
-
-        if (hours > 0)
-        {
-            return minutes > 0 ? $"{hours}h {minutes}m" : $"{hours}h";
-        }
-        return $"{minutes}m";
-    }
 }
 
 <style>
@@ -212,42 +197,9 @@ else
         flex: 1;
     }
 
-    .no-exports {
-        padding: 20px;
-        text-align: center;
-        color: #6c757d;
-        font-size: 13px;
-    }
-
     .excluded-note {
         margin-top: 8px;
         font-size: 12px;
         color: #856404;
-    }
-
-    .loading-container {
-        padding: 40px 20px;
-        text-align: center;
-        color: #6c757d;
-    }
-
-        .loading-container p {
-            margin-top: 15px;
-            font-size: 13px;
-        }
-
-    .spinner {
-        border: 3px solid #f3f3f3;
-        border-top: 3px solid #0078d4;
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
-        animation: spin 1s linear infinite;
-        margin: 0 auto;
-    }
-
-    @@keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
     }
 </style>

@@ -5,15 +5,7 @@ namespace FillMyADT.Models.Configuration;
 /// </summary>
 public record GitEventSourceConfig : EventSourceConfig
 {
-    public GitEventSourceConfig() : base()
-    {
-        SourceType = "GitEventSource";
-    }
-
-    public GitEventSourceConfig(string sourceType) : base()
-    {
-        SourceType = sourceType;
-    }
+    public GitEventSourceConfig() => SourceType = "GitEventSource";
 
     /// <summary>
     /// Path to the default/primary Git repository used to resolve the active branch for a given day.

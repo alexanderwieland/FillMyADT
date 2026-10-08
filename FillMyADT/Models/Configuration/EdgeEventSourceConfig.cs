@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 
 namespace FillMyADT.Models.Configuration;
 
@@ -7,10 +7,7 @@ namespace FillMyADT.Models.Configuration;
 /// </summary>
 public record EdgeEventSourceConfig : EventSourceConfig
 {
-    public EdgeEventSourceConfig() : base()
-    {
-        SourceType = "EdgeEventSource";
-    }
+    public EdgeEventSourceConfig() => SourceType = "EdgeEventSource";
 
     /// <summary>
     /// Path to Edge profile directory (default: Default profile)
@@ -40,15 +37,10 @@ public record EdgeEventSourceConfig : EventSourceConfig
     public int MaxVisitsPerQuery { get; init; } = 1000;
 
     /// <summary>
-    /// Maximum gap in minutes between TFS visits to consider them consecutive
-    /// If gap > this value, use fixed 30min duration instead of time range
+    /// Minimum number of distinct 15-minute blocks a TFS ticket must be visited in per day.
+    /// Tickets below this are treated as glances and ignored.
     /// </summary>
-    public int TfsMaxGapMinutes { get; init; } = 60;
-
-    /// <summary>
-    /// Fixed duration in minutes for TFS tickets when visits are not consecutive
-    /// </summary>
-    public int TfsFixedDurationMinutes { get; init; } = 30;
+    public int TfsMinBlocks { get; init; } = 2;
 
     /// <summary>
     /// Include page title in event description

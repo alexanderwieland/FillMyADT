@@ -1,4 +1,4 @@
-using FillMyADT.Models;
+﻿using FillMyADT.Models;
 using FillMyADT.Models.Configuration;
 using FillMyADT.Services.BrowserHistory;
 using Serilog;
@@ -13,6 +13,9 @@ namespace FillMyADT.Services.EventSources;
 public class EdgeEventSource : IEventSource
 {
     private static readonly ILogger Log = Serilog.Log.ForContext<EdgeEventSource>();
+
+    private const string RedmineDomain = "redmine.mp2.at";
+    private const string TfsDomain = "tfs.mp2.at";
 
     private readonly EdgeEventSourceConfig _config;
 
@@ -82,428 +85,175 @@ public class EdgeEventSource : IEventSource
 
     private List<BrowserVisit> FilterVisits(List<BrowserVisit> visits)
     {
+        bool UrlMatches(BrowserVisit v, List<string> domains) =>
+            domains.Any(d => v.Url.Contains(d, StringComparison.OrdinalIgnoreCase));
+
         var filtered = visits.Where(v =>
-        {
-            // Filter by minimum duration
-            if (v.VisitDurationSeconds < _config.MinVisitDurationSeconds)
-                return false;
-
-            // Filter by included domains
-            if (_config.IncludeDomains.Count > 0)
-            {
-                var matchesDomain = _config.IncludeDomains.Any(domain =>
-                    v.Url.Contains(domain, StringComparison.OrdinalIgnoreCase));
-
-                if (!matchesDomain)
-                    return false;
-            }
-
-            // Filter by excluded domains
-            if (_config.ExcludeDomains.Count > 0)
-            {
-                var matchesExcluded = _config.ExcludeDomains.Any(domain =>
-                    v.Url.Contains(domain, StringComparison.OrdinalIgnoreCase));
-
-                if (matchesExcluded)
-                    return false;
-            }
-
-            return true;
-        }).ToList();
+            v.VisitDurationSeconds >= _config.MinVisitDurationSeconds
+            && (_config.IncludeDomains.Count == 0 || UrlMatches(v, _config.IncludeDomains))
+            && !UrlMatches(v, _config.ExcludeDomains)).ToList();
 
         Log.Debug("Filtered {FilteredCount} of {TotalCount} visits", filtered.Count, visits.Count);
         return filtered;
     }
-
-    private List<Event> ProcessVisits(List<BrowserVisit> visits)
-    {
-        var events = new List<Event>();
-
-        if (visits.Count == 0)
-            return events;
-
-        // Extract ticket info from all visits
-        var visitTickets = visits
-            .Select(v =>
-            {
-                var source = DetermineTicketSource(v.Url);
-                var titleTicket = v.Title != null ? TicketParser.FromBrowserTitle(v.Title) : null;
-                var urlTicket = TicketParser.FromBrowserUrl(v.Url);
-
-                return new VisitWithTicket
-                {
-                    Visit = v,
-                    Source = source,
-                    TitleBasedTicket = titleTicket,
-                    UrlBasedTicket = urlTicket
-                };
-            })
-            .Where(x => x.Source != TicketSource.Unknown &&
-                       (!string.IsNullOrEmpty(x.TitleBasedTicket) || !string.IsNullOrEmpty(x.UrlBasedTicket)))
-            .ToList();
-
-        // Separate Redmine and TFS visits
-        var redmineVisits = visitTickets.Where(x => x.Source == TicketSource.Redmine).ToList();
-
-        // For TFS: Only include visits with valid ticket numbers (#xxxxx format from title)
-        var tfsVisits = visitTickets
-            .Where(x => x.Source == TicketSource.TFS && !string.IsNullOrEmpty(x.TitleBasedTicket))
-            .ToList();
-
-        var ignoredTfsCount = visitTickets.Count(x => x.Source == TicketSource.TFS && string.IsNullOrEmpty(x.TitleBasedTicket));
-        if (ignoredTfsCount > 0)
-        {
-            Log.Information("Ignored {Count} TFS visits without valid #xxxxx ticket numbers", ignoredTfsCount);
-        }
-
-        Log.Information("Processing {TotalCount} visits: {RedmineCount} Redmine, {TfsCount} TFS",
-            visitTickets.Count, redmineVisits.Count, tfsVisits.Count);
-
-        // Process Redmine: Group into half-day timeslots
-        events.AddRange(ProcessRedmineVisits(redmineVisits));
-
-        // Process TFS: Individual tickets with time ranges
-        events.AddRange(ProcessTfsVisits(tfsVisits));
-
-        return events;
-    }
-
-    private List<Event> ProcessRedmineVisits(List<VisitWithTicket> redmineVisits)
-    {
-        var events = new List<Event>();
-
-        if (redmineVisits.Count == 0)
-            return events;
-
-        // Group by date and half-day (AM/PM)
-        var halfDayGroups = redmineVisits
-            .GroupBy(v => new
-            {
-                Date = v.Visit.VisitTime.Date,
-                HalfDay = v.Visit.VisitTime.Hour < 12 ? "AM" : "PM"
-            })
-            .ToList();
-
-        foreach (var group in halfDayGroups)
-        {
-            var distinctTickets = group.Select(v => v.TitleBasedTicket ?? v.UrlBasedTicket!).Distinct().ToList();
-            var ticketCount = distinctTickets.Count;
-
-            // Determine duration based on ticket count
-            var durationMinutes = ticketCount < 5 ? 15 : 30;
-
-            // Use earliest visit time in this half-day
-            var earliestVisit = group.OrderBy(v => v.Visit.VisitTime).First().Visit;
-
-            // Collect all visit details
-            var allUrls = group.Select(v => v.Visit.Url).Distinct().ToList();
-            var totalVisits = group.Count();
-
-            // Create START and END events (like calendar meetings)
-            var startEndEvents = CreateRedmineGroupEventPair(
-                earliestVisit,
-                distinctTickets,
-                durationMinutes,
-                totalVisits,
-                allUrls,
-                group.Key.HalfDay);
-
-            events.AddRange(startEndEvents);
-
-            Log.Debug("Redmine {HalfDay} group on {Date}: {TicketCount} tickets, {Duration}min, {VisitCount} visits",
-                group.Key.HalfDay, group.Key.Date.ToShortDateString(), ticketCount, durationMinutes, totalVisits);
-        }
-
-        return events;
-    }
-
-    private List<Event> ProcessTfsVisits(List<VisitWithTicket> tfsVisits)
-    {
-        var events = new List<Event>();
-
-        if (tfsVisits.Count == 0)
-            return events;
-
-        // Group by date and ticket number from page title (TFS URL numbers are not ticket numbers)
-        var ticketGroups = tfsVisits
-            .GroupBy(v => new { Date = v.Visit.VisitTime.Date, GroupingTicket = v.TitleBasedTicket! })
-            .ToList();
-
-        foreach (var ticketGroup in ticketGroups)
-        {
-            var visitsForTicket = ticketGroup.ToList();
-
-            // All TFS visits in this group are keyed on TitleBasedTicket
-            var displayTicket = ticketGroup.Key.GroupingTicket;
-
-            // Get ordered visits for this ticket
-            var orderedVisits = visitsForTicket.OrderBy(v => v.Visit.VisitTime).ToList();
-            var firstVisit = orderedVisits.First().Visit;
-            var lastVisit = orderedVisits.Last().Visit;
-
-            // Collect URLs and title
-            var urls = visitsForTicket.Select(v => v.Visit.Url).Distinct().ToList();
-            var title = visitsForTicket
-                .Select(v => v.Visit.Title)
-                .Where(t => !string.IsNullOrWhiteSpace(t))
-                .OrderByDescending(t => t!.Length)
-                .FirstOrDefault();
-
-            // Check if visits are consecutive (within configured gap threshold)
-            var areVisitsConsecutive = AreVisitsConsecutive(
-                orderedVisits.Select(v => v.Visit).ToList(),
-                _config.TfsMaxGapMinutes);
-
-            BrowserVisit endVisit;
-            if (areVisitsConsecutive && orderedVisits.Count > 1)
-            {
-                // Use actual time range for consecutive visits
-                endVisit = lastVisit;
-                Log.Debug("TFS ticket {Ticket}: Using time range (consecutive visits)", displayTicket);
-            }
-            else
-            {
-                // Use configured fixed duration for non-consecutive or single visits
-                endVisit = new BrowserVisit
-                {
-                    VisitTime = firstVisit.VisitTime.AddMinutes(_config.TfsFixedDurationMinutes),
-                    VisitDurationMicroseconds = 0,
-                    Url = firstVisit.Url,
-                    Title = firstVisit.Title,
-                    VisitCount = firstVisit.VisitCount
-                };
-                Log.Debug("TFS ticket {Ticket}: Using fixed {Duration}min duration (gap detected or single visit)",
-                    displayTicket, _config.TfsFixedDurationMinutes);
-            }
-
-            // Create START and END events (like calendar meetings)
-            var startEndEvents = CreateTfsTicketEventPair(
-                firstVisit,
-                endVisit,
-                displayTicket!,
-                visitsForTicket.Count,
-                urls,
-                title);
-
-            events.AddRange(startEndEvents);
-
-            Log.Debug("TFS ticket {Ticket} on {Date}: {Start} - {End}, {VisitCount} visits",
-                displayTicket, ticketGroup.Key.Date.ToShortDateString(),
-                firstVisit.VisitTime.ToString("HH:mm"), endVisit.VisitTime.ToString("HH:mm"),
-                visitsForTicket.Count);
-        }
-
-        return events;
-    }
-
-    /// <summary>
-    /// Check if visits are consecutive (no large gaps between them)
-    /// </summary>
-    private static bool AreVisitsConsecutive(List<BrowserVisit> orderedVisits, int maxGapMinutes)
-    {
-        if (orderedVisits.Count <= 1)
-            return false;
-
-        for (int i = 1; i < orderedVisits.Count; i++)
-        {
-            var gap = (orderedVisits[i].VisitTime - orderedVisits[i - 1].VisitTime).TotalMinutes;
-            if (gap > maxGapMinutes)
-            {
-                return false; // Found a gap larger than threshold
-            }
-        }
-
-        return true; // All visits are within threshold
-    }
-
-    private List<Event> CreateRedmineGroupEventPair(
-        BrowserVisit earliestVisit,
-        List<string> tickets,
-        int durationMinutes,
-        int totalVisits,
-        List<string> urls,
-        string halfDay)
-    {
-        var ticketList = string.Join(", ", tickets.OrderBy(t => t).Select(t => t.StartsWith('#') ? t : $"#{t}"));
-        var description = $"Redmine Tickets ({tickets.Count} tickets)";
-
-        var metadata = new Dictionary<string, string>
-        {
-            ["TicketNumber"] = ticketList,
-            ["TicketCount"] = tickets.Count.ToString(),
-            ["VisitCount"] = totalVisits.ToString(),
-            ["Duration"] = durationMinutes.ToString(),
-            ["HalfDay"] = halfDay,
-            ["Domain"] = "redmine.mp2.at"
-        };
-
-        // Add first few URLs as reference
-        for (int i = 0; i < Math.Min(urls.Count, 5); i++)
-        {
-            metadata[$"Url{i + 1}"] = urls[i];
-        }
-
-        // Round start time to nearest 15 minutes
-        var startTime = TimeOnly.FromDateTime(earliestVisit.VisitTime);
-        var roundedStartTime = RoundToNearest15Minutes(startTime);
-        var roundedStartDateTime = earliestVisit.VisitTime.Date.Add(roundedStartTime.ToTimeSpan());
-
-        var startEvent = new Event
-        {
-            Source = Name,
-            Timestamp = roundedStartDateTime,
-            EventType = EventType.TicketStart,
-            Description = description,
-            Metadata = new Dictionary<string, string>(metadata)
-            {
-                ["Category"] = "Redmine"
-            }
-        };
-
-        var endEvent = new Event
-        {
-            Source = Name,
-            Timestamp = roundedStartDateTime.AddMinutes(durationMinutes),
-            EventType = EventType.TicketEnd,
-            Description = description,
-            Metadata = new Dictionary<string, string>(metadata)
-        };
-
-        return [startEvent, endEvent];
-    }
-
-    private List<Event> CreateTfsTicketEventPair(
-        BrowserVisit firstVisit,
-        BrowserVisit lastVisit,
-        string ticketNumber,
-        int visitCount,
-        List<string> urls,
-        string? title)
-    {
-        var domain = ExtractDomain(firstVisit.Url);
-
-        // Use title if available, otherwise use ticket number
-        var description = _config.IncludePageTitle && !string.IsNullOrWhiteSpace(title)
-            ? $"#{ticketNumber}: {title}"
-            : $"#{ticketNumber}";
-
-        // Round times to nearest 15 minutes
-        var startTime = TimeOnly.FromDateTime(firstVisit.VisitTime);
-        var endTime = TimeOnly.FromDateTime(lastVisit.VisitTime);
-
-        var roundedStartTime = RoundToNearest15Minutes(startTime);
-        var roundedEndTime = RoundToNearest15Minutes(endTime);
-
-        // Ensure end is after start
-        if (roundedEndTime <= roundedStartTime)
-        {
-            roundedEndTime = roundedStartTime.Add(TimeSpan.FromMinutes(15));
-        }
-
-        var roundedStartDateTime = firstVisit.VisitTime.Date.Add(roundedStartTime.ToTimeSpan());
-        var roundedEndDateTime = lastVisit.VisitTime.Date.Add(roundedEndTime.ToTimeSpan());
-
-        // Calculate duration in minutes
-        var durationMinutes = (int)(roundedEndDateTime - roundedStartDateTime).TotalMinutes;
-
-        var metadata = new Dictionary<string, string>
-        {
-            ["TicketNumber"] = ticketNumber,
-            ["Domain"] = domain,
-            ["VisitCount"] = visitCount.ToString(),
-            ["StartTime"] = roundedStartDateTime.ToString("HH:mm:ss"),
-            ["EndTime"] = roundedEndDateTime.ToString("HH:mm:ss"),
-            ["Duration"] = durationMinutes.ToString()
-        };
-
-        // Add first few URLs as reference
-        for (int i = 0; i < Math.Min(urls.Count, 3); i++)
-        {
-            metadata[$"Url{i + 1}"] = urls[i];
-        }
-
-        if (!string.IsNullOrWhiteSpace(title))
-        {
-            metadata["PageTitle"] = title;
-        }
-
-        // ALL TFS/Edge browser events use ReviewStart/ReviewEnd
-        var startEvent = new Event
-        {
-            Source = Name,
-            Timestamp = roundedStartDateTime,
-            EventType = EventType.ReviewStart,
-            Description = description,
-            Metadata = new Dictionary<string, string>(metadata)
-            {
-                ["Category"] = "TFS"
-            }
-        };
-
-        var endEvent = new Event
-        {
-            Source = Name,
-            Timestamp = roundedEndDateTime,
-            EventType = EventType.ReviewEnd,
-            Description = description,
-            Metadata = new Dictionary<string, string>(metadata)
-        };
-
-        return [startEvent, endEvent];
-    }
-
-    private TicketSource DetermineTicketSource(string url)
-    {
-        if (url.Contains("redmine.mp2.at", StringComparison.OrdinalIgnoreCase))
-            return TicketSource.Redmine;
-
-        if (url.Contains("tfs.mp2.at", StringComparison.OrdinalIgnoreCase))
-            return TicketSource.TFS;
-
-        return TicketSource.Unknown;
-    }
-
-    private static string ExtractDomain(string url)
-    {
-        try
-        {
-            var uri = new Uri(url);
-            return uri.Host;
-        }
-        catch
-        {
-            return "unknown";
-        }
-    }
-
-    /// <summary>
-    /// Round time to nearest 15-minute interval (00, 15, 30, 45)
-    /// </summary>
-    private static TimeOnly RoundToNearest15Minutes(TimeOnly time)
-    {
-        var totalMinutes = time.Hour * 60 + time.Minute;
-        var roundedMinutes = (int)Math.Round(totalMinutes / 15.0) * 15;
-
-        if (roundedMinutes >= 24 * 60)
-        {
-            roundedMinutes = 24 * 60 - 15;
-        }
-
-        return new TimeOnly(roundedMinutes / 60, roundedMinutes % 60);
-    }
-
-    private enum TicketSource
-    {
-        Unknown,
-        Redmine,
-        TFS
-    }
-
-    private class VisitWithTicket
-    {
-        public required BrowserVisit Visit { get; init; }
-        public TicketSource Source { get; init; }
-        public string? TitleBasedTicket { get; init; }
-        public string? UrlBasedTicket { get; init; }
-    }
+	private List<Event> ProcessVisits(List<BrowserVisit> visits)
+	{
+		var redmine = new List<(BrowserVisit Visit, string Ticket)>();
+		var tfs = new List<(BrowserVisit Visit, string Ticket)>();
+
+		foreach (var visit in visits)
+		{
+			if (visit.Url.Contains(RedmineDomain, StringComparison.OrdinalIgnoreCase))
+			{
+				var ticket = TicketParser.FromBrowserTitle(visit.Title) ?? TicketParser.FromBrowserUrl(visit.Url);
+				if (ticket != null)
+					redmine.Add((visit, ticket));
+			}
+			else if (visit.Url.Contains(TfsDomain, StringComparison.OrdinalIgnoreCase))
+			{
+				// TFS URL numbers are internal ids; only the page title carries the ticket number
+				var ticket = TicketParser.FromBrowserTitle(visit.Title);
+				if (ticket != null)
+					tfs.Add((visit, ticket));
+			}
+		}
+
+		Log.Information("Processing visits: {RedmineCount} Redmine, {TfsCount} TFS", redmine.Count, tfs.Count);
+
+		return [.. ProcessRedmineVisits(redmine), .. ProcessTfsVisits(tfs)];
+	}
+
+	/// <summary>
+	/// Redmine visits are summarized per half-day: one block whose length depends on how many tickets were viewed
+	/// </summary>
+	private IEnumerable<Event> ProcessRedmineVisits(List<(BrowserVisit Visit, string Ticket)> visits)
+	{
+		foreach (var group in visits.GroupBy(v => (v.Visit.VisitTime.Date, HalfDay: v.Visit.VisitTime.Hour < 12 ? "AM" : "PM")))
+		{
+			var tickets = group.Select(v => v.Ticket).Distinct().Order().ToList();
+			var urls = group.Select(v => v.Visit.Url).Distinct().Take(5).ToList();
+			var durationMinutes = tickets.Count < 5 ? 15 : 30;
+			var start = RoundNearest(group.Min(v => v.Visit.VisitTime));
+
+			var metadata = new Dictionary<string, string>
+			{
+				["TicketNumber"] = string.Join(", ", tickets.Select(t => $"#{t}")),
+				["TicketCount"] = tickets.Count.ToString(),
+				["VisitCount"] = group.Count().ToString(),
+				["Duration"] = durationMinutes.ToString(),
+				["HalfDay"] = group.Key.HalfDay,
+				["Domain"] = RedmineDomain
+			};
+			AddUrls(metadata, urls);
+
+			foreach (var e in CreateEventPair(start, start.AddMinutes(durationMinutes),
+				EventType.TicketStart, EventType.TicketEnd, $"Redmine Tickets ({tickets.Count} tickets)", "Redmine", metadata))
+				yield return e;
+		}
+	}
+
+	/// <summary>
+	/// TFS visits are grouped per ticket and day. Each 15-minute block containing at least one visit counts
+	/// as worked; adjacent blocks merge into one slot. Tickets touched in fewer than
+	/// <see cref="EdgeEventSourceConfig.TfsMinBlocks"/> blocks per day are treated as glances and dropped.
+	/// Browser dwell time is ignored because an open tab does not mean active work.
+	/// </summary>
+	private IEnumerable<Event> ProcessTfsVisits(List<(BrowserVisit Visit, string Ticket)> visits)
+	{
+		foreach (var group in visits.GroupBy(v => (v.Visit.VisitTime.Date, v.Ticket)))
+		{
+			var ticket = group.Key.Ticket;
+			var title = group
+				.Select(v => v.Visit.Title)
+				.Where(t => !string.IsNullOrWhiteSpace(t))
+				.MaxBy(t => t!.Length);
+			var description = _config.IncludePageTitle && title != null ? $"#{ticket}: {title}" : $"#{ticket}";
+
+			var blocks = group
+				.Select(v => v.Visit)
+				.GroupBy(v => FloorToBlock(v.VisitTime))
+				.OrderBy(b => b.Key)
+				.ToList();
+
+			if (blocks.Count < _config.TfsMinBlocks)
+			{
+				Log.Debug("TFS ticket {Ticket} on {Date}: ignored as glance ({Blocks} block)", ticket, group.Key.Date.ToShortDateString(), blocks.Count);
+				continue;
+			}
+
+			foreach (var run in SplitIntoRuns(blocks))
+			{
+				var session = run.SelectMany(b => b).ToList();
+				var start = run[0].Key;
+				var end = run[^1].Key.AddMinutes(BlockMinutes);
+
+				var metadata = new Dictionary<string, string>
+				{
+					["TicketNumber"] = ticket,
+					["Domain"] = Uri.TryCreate(session[0].Url, UriKind.Absolute, out var uri) ? uri.Host : "unknown",
+					["VisitCount"] = session.Count.ToString(),
+					["StartTime"] = start.ToString("HH:mm:ss"),
+					["EndTime"] = end.ToString("HH:mm:ss"),
+					["Duration"] = ((int)(end - start).TotalMinutes).ToString()
+				};
+				AddUrls(metadata, session.Select(v => v.Url).Distinct().Take(3).ToList());
+				if (title != null)
+					metadata["PageTitle"] = title;
+
+				foreach (var e in CreateEventPair(start, end, EventType.ReviewStart, EventType.ReviewEnd, description, "TFS", metadata))
+					yield return e;
+			}
+		}
+	}
+
+	private const int BlockMinutes = 15;
+
+	private static DateTime FloorToBlock(DateTime time) =>
+		time.Date.AddMinutes((int)time.TimeOfDay.TotalMinutes / BlockMinutes * BlockMinutes);
+
+	/// <summary>
+	/// Split ordered blocks into runs of directly adjacent blocks
+	/// </summary>
+	private static List<List<IGrouping<DateTime, BrowserVisit>>> SplitIntoRuns(List<IGrouping<DateTime, BrowserVisit>> orderedBlocks)
+	{
+		var runs = new List<List<IGrouping<DateTime, BrowserVisit>>>();
+		foreach (var block in orderedBlocks)
+		{
+			if (runs.Count == 0 || block.Key != runs[^1][^1].Key.AddMinutes(BlockMinutes))
+				runs.Add([]);
+			runs[^1].Add(block);
+		}
+		return runs;
+	}
+
+	private Event[] CreateEventPair(
+		DateTime start, DateTime end, EventType startType, EventType endType,
+		string description, string category, Dictionary<string, string> metadata) =>
+	[
+		new Event
+		{
+			Source = Name,
+			Timestamp = start,
+			EventType = startType,
+			Description = description,
+			Metadata = new Dictionary<string, string>(metadata) { ["Category"] = category }
+		},
+		new Event
+		{
+			Source = Name,
+			Timestamp = end,
+			EventType = endType,
+			Description = description,
+			Metadata = metadata
+		}
+	];
+
+	private static void AddUrls(Dictionary<string, string> metadata, List<string> urls)
+	{
+		for (var i = 0; i < urls.Count; i++)
+			metadata[$"Url{i + 1}"] = urls[i];
+	}
+
+	private static DateTime RoundNearest(DateTime time) =>
+		time.Date.Add(TimeHelper.RoundNearest(TimeOnly.FromDateTime(time), 15).ToTimeSpan());
 }

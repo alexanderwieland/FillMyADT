@@ -1,4 +1,4 @@
-using FillMyADT.Models;
+﻿using FillMyADT.Models;
 using FillMyADT.Services.EventSources;
 using Serilog;
 
@@ -165,14 +165,6 @@ public class EventToTimeSpanConverter
     }
 
     /// <summary>
-    /// Convert events to time slots (synchronous version for backward compatibility)
-    /// </summary>
-    public IReadOnlyList<TimeSlot> ConvertEventsToTimeSlots(IReadOnlyList<Event> events)
-    {
-        return ConvertEventsToTimeSlotsInternal(events, branchHistory: []);
-    }
-
-    /// <summary>
     /// Internal implementation of time slot conversion
     /// </summary>
     private IReadOnlyList<TimeSlot> ConvertEventsToTimeSlotsInternal(IReadOnlyList<Event> events, List<(DateTime Time, string Branch, string? Ticket)> branchHistory)
@@ -213,63 +205,98 @@ public class EventToTimeSpanConverter
 
         var date = DateOnly.FromDateTime(bootEvent.Timestamp.Date);
 
+        // Only use events of this day; times are compared as TimeOnly below, so events from other
+        // days would otherwise leak in. End events at/after midnight are kept to close meetings.
+        sortedEvents = sortedEvents
+            .Where(e => DateOnly.FromDateTime(e.Timestamp) == date
+                        || (e.EventType is EventType.CalendarMeetingEnd or EventType.ReviewEnd or EventType.TicketEnd
+                            && DateOnly.FromDateTime(e.Timestamp) == date.AddDays(1)))
+            .ToList();
+        shutdownEvent = sortedEvents.LastOrDefault(e => e.EventType == EventType.Shutdown);
+
         // First slot: boot rounded up to 5min, until next quarter hour
-        var firstSlotStart = RoundUpToNearest(TimeOnly.FromDateTime(bootEvent.Timestamp), FirstSlotRoundingMinutes);
-        var firstSlotEnd = RoundUpToNextQuarterHour(firstSlotStart);
+        var firstSlotStart = TimeHelper.RoundUp(TimeOnly.FromDateTime(bootEvent.Timestamp), FirstSlotRoundingMinutes);
+        var firstSlotEnd = TimeHelper.RoundUp(firstSlotStart, StandardRoundingMinutes);
 
         // If first slot would be 0 duration, extend to next quarter (15 min minimum)
         if (firstSlotStart == firstSlotEnd)
         {
-            firstSlotEnd = firstSlotEnd.AddMinutes(15);
+            firstSlotEnd = firstSlotEnd.AddMinutes(StandardRoundingMinutes);
         }
 
         // Work slots start after first slot
         var workStart = firstSlotEnd;
         var workEnd = shutdownEvent != null
-            ? RoundDownToNearest(TimeOnly.FromDateTime(shutdownEvent.Timestamp), LastSlotRoundingMinutes)
-            : new TimeOnly(17, 0); // Default to 5 PM if no shutdown
+            ? TimeHelper.RoundDown(TimeOnly.FromDateTime(shutdownEvent.Timestamp), LastSlotRoundingMinutes)
+            : new TimeOnly(22, 0); // Default to 10 PM if no shutdown
 
-        // Extract calendar meetings from events
-        var calendarMeetings = ExtractCalendarMeetings(sortedEvents, workStart, workEnd);
+		// Meetings, browser ticket blocks and the lunch break are fixed blocks; work slots fill the gaps between them
+		var fixedBlocks = ExtractCalendarMeetings(sortedEvents, workStart, workEnd);
 
-        // Get all work-related events (commits) between work start and end
-        var workEvents = sortedEvents
-            .Where(e => e.EventType != EventType.Boot && e.EventType != EventType.Shutdown
-                     && e.EventType != EventType.CalendarMeetingStart && e.EventType != EventType.CalendarMeetingEnd
-                     && e.EventType != EventType.TicketStart && e.EventType != EventType.TicketEnd
-                     && e.EventType != EventType.ReviewStart && e.EventType != EventType.ReviewEnd)
-            .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= workStart &&
-                       TimeOnly.FromDateTime(e.Timestamp) <= workEnd)
-            .ToList();
+		var workEvents = sortedEvents
+			.Where(e => e.EventType is not (EventType.Boot or EventType.Shutdown
+				or EventType.CalendarMeetingStart or EventType.CalendarMeetingEnd
+				or EventType.TicketStart or EventType.TicketEnd
+				or EventType.ReviewStart or EventType.ReviewEnd
+				or EventType.LunchBreakStart or EventType.LunchBreakEnd))
+			.Where(e => TimeOnly.FromDateTime(e.Timestamp) >= workStart &&
+					   TimeOnly.FromDateTime(e.Timestamp) <= workEnd)
+			.ToList();
 
-        var timeSlots = new List<TimeSlot>();
+		if (!fixedBlocks.Any(m => m.Category == TimeSlotCategory.Break)
+			&& workStart < BreakWindowEnd && workEnd > BreakWindowStart)
+		{
+			var (breakStart, breakEnd) = DetectLunchBreak(fixedBlocks, workEvents);
+			if (breakStart < workStart) breakStart = workStart;
+			if (breakEnd > workEnd) breakEnd = workEnd;
+			if (breakStart < breakEnd)
+			{
+				fixedBlocks = ResolveOverlappingMeetings(
+					[.. fixedBlocks, new CalendarMeeting(breakStart, breakEnd, "Lunch Break", TimeSlotCategory.Break)]);
+			}
+		}
 
-        // Add the first slot (startup slot)
-        timeSlots.Add(new TimeSlot
-        {
-            Date = date,
-            StartTime = firstSlotStart,
-            EndTime = firstSlotEnd,
-            TicketNr = null,
-            Text = "Startup",
-            Source = GetSourceFromCategory(TimeSlotCategory.Startup),
-            Category = TimeSlotCategory.Startup
-        });
+		var timeSlots = new List<TimeSlot>
+		{
+			new()
+			{
+				Date = date,
+				StartTime = firstSlotStart,
+				EndTime = firstSlotEnd,
+				Text = "Startup",
+				Source = GetSourceFromCategory(TimeSlotCategory.Startup),
+				Category = TimeSlotCategory.Startup
+			}
+		};
 
-        // Create work and meeting slots
-        if (calendarMeetings.Count == 0)
-        {
-            // No meetings - use original logic
-            CreateWorkSlotsWithNoonBreak(timeSlots, date, workStart, workEnd, workEvents, branchHistory);
-        }
-        else
-        {
-            // Have meetings - create granular slots
-            CreateGranularSlotsWithMeetings(timeSlots, date, workStart, workEnd, workEvents, calendarMeetings, branchHistory);
-        }
+		var currentTime = workStart;
+		foreach (var block in fixedBlocks.OrderBy(b => b.Start))
+		{
+			var blockStart = block.Start < currentTime ? currentTime : block.Start;
+			if (blockStart >= block.End)
+				continue;
 
-        // Automatically merge consecutive work slots that share the same ticket number
-        timeSlots = MergeConsecutiveSameTicketSlots(timeSlots);
+			if (currentTime < blockStart)
+				timeSlots.Add(CreateWorkSlot(date, currentTime, blockStart, workEvents, branchHistory));
+
+			timeSlots.Add(new TimeSlot
+			{
+				Date = date,
+				StartTime = blockStart,
+				EndTime = block.End,
+				TicketNr = block.TicketNumber,
+				Text = block.Subject,
+				Source = GetSourceFromCategory(block.Category),
+				Category = block.Category
+			});
+			currentTime = block.End;
+		}
+
+		if (currentTime < workEnd)
+			timeSlots.Add(CreateWorkSlot(date, currentTime, workEnd, workEvents, branchHistory));
+
+		// Automatically merge consecutive work slots that share the same ticket number
+		timeSlots = MergeConsecutiveSameTicketSlots(timeSlots);
 
         // Apply location to all slots based on homeoffice day or default
         var defaultLocation = _appConfig?.DefaultLocation == "WV" ? Location.WV : Location.HOME;
@@ -316,25 +343,31 @@ public class EventToTimeSpanConverter
             // Only add lunch if it's within work hours
             if (lunchStartTime >= workStart && lunchEndTime <= workEnd)
             {
-                meetings.Add(new CalendarMeeting(lunchStartTime, lunchStartTime.AddMinutes(MinBreakMinutes), "Lunch Break", TimeSlotCategory.Break));
+                var minEnd = lunchStartTime.AddMinutes(MinBreakMinutes);
+                meetings.Add(new CalendarMeeting(lunchStartTime, lunchEndTime > minEnd ? lunchEndTime : minEnd, "Lunch Break", TimeSlotCategory.Break));
                 Log.Debug("Added lunch break to schedule: {Start} - {End}", lunchStartTime, lunchEndTime);
             }
         }
 
+        var usedEnds = new HashSet<Event>(ReferenceEqualityComparer.Instance);
         foreach (var startEvent in meetingStarts)
         {
-            // Match corresponding end event (CalendarMeetingEnd, ReviewEnd, or TicketEnd)
+            // Match corresponding
             var expectedEndType = startEvent.EventType == EventType.ReviewStart ? EventType.ReviewEnd :
                                   startEvent.EventType == EventType.TicketStart ? EventType.TicketEnd :
                                   EventType.CalendarMeetingEnd;
 
-            var endEvent = events.FirstOrDefault(e =>
-                e.EventType == expectedEndType &&
-                e.Description == startEvent.Description &&
-                e.Timestamp >= startEvent.Timestamp);
+            // Each end event may only close one start (same-subject meetings can overlap/recur)
+            var endEvent = events
+                .Where(e => e.EventType == expectedEndType &&
+                            e.Description == startEvent.Description &&
+                            e.Timestamp >= startEvent.Timestamp &&
+                            !usedEnds.Contains(e))
+                .MinBy(e => e.Timestamp);
 
             if (endEvent == null)
                 continue;
+            usedEnds.Add(endEvent);
 
             var start = TimeOnly.FromDateTime(startEvent.Timestamp);
             var end = TimeOnly.FromDateTime(endEvent.Timestamp);
@@ -343,13 +376,11 @@ public class EventToTimeSpanConverter
             if (end <= workStart || start >= workEnd)
                 continue;
 
+            // Midnight-crossing end (e.g. 00:00) means "until end of day"
+            if (endEvent.Timestamp.Date > startEvent.Timestamp.Date)
+                end = workEnd;
             if (start < workStart)
-            {
-                // Shift the end forward by the same amount so the duration is preserved
-                var shift = workStart - start;
-                end = end.Add(shift);
                 start = workStart;
-            }
             if (end > workEnd)
                 end = workEnd;
 
@@ -364,7 +395,59 @@ public class EventToTimeSpanConverter
     }
 
     /// <summary>
-    /// Returns true for categories that represent browser-derived ticket slots (Redmine/TFS).
+    /// Place the break at the free spot closest to its detected start inside the break window,
+    /// keeping its duration (shrinking to MinBreakMinutes if needed). Kept unchanged if nothing fits.
+    /// </summary>
+    private static CalendarMeeting FitBreak(CalendarMeeting brk, List<CalendarMeeting> others)
+    {
+        var preferred = Math.Max(MinBreakMinutes, (int)(brk.End - brk.Start).TotalMinutes);
+        var blocks = others
+            .Where(m => !IsFlexibleTicketSlot(m.Category) && m.End > BreakWindowStart && m.Start < BreakWindowEnd)
+            .OrderBy(m => m.Start)
+            .ToList();
+
+        // Free gaps inside the break window
+        var gaps = new List<(TimeOnly Start, TimeOnly End)>();
+        var cursor = BreakWindowStart;
+        foreach (var b in blocks)
+        {
+            if (b.Start > cursor)
+                gaps.Add((cursor, b.Start));
+            if (b.End > cursor)
+                cursor = b.End;
+        }
+        if (cursor < BreakWindowEnd)
+            gaps.Add((cursor, BreakWindowEnd));
+
+        foreach (var minutes in new[] { preferred, MinBreakMinutes }.Distinct())
+        {
+            var best = gaps
+                .Where(g => (g.End - g.Start).TotalMinutes >= minutes)
+                .Select(g =>
+                {
+                    var latestStart = g.End.AddMinutes(-minutes);
+                    var start = brk.Start < g.Start ? g.Start : brk.Start > latestStart ? latestStart : brk.Start;
+                    return (Start: start, Distance: Math.Abs((start - brk.Start).TotalMinutes));
+                })
+                .OrderBy(c => c.Distance)
+                .Select(c => (TimeOnly?)c.Start)
+                .FirstOrDefault();
+
+            if (best is { } s)
+            {
+                if (s != brk.Start || minutes != (int)(brk.End - brk.Start).TotalMinutes)
+                    Log.Debug("Break moved from {OldStart} to {NewStart} ({Minutes} min) to avoid overlaps", brk.Start, s, minutes);
+                return brk with { Start = s, End = s.AddMinutes(minutes) };
+            }
+        }
+
+        Log.Warning("No free {Minutes}-minute gap for the break between {From} and {To}; keeping it at {Start}",
+            MinBreakMinutes, BreakWindowStart, BreakWindowEnd, brk.Start);
+        return brk;
+    }
+
+    /// <summary>
+    /// Returns true for categories that represent browser-derived ticket slots
     /// These are flexible and must yield to fixed Outlook calendar meetings.
     /// </summary>
     private static bool IsFlexibleTicketSlot(TimeSlotCategory category) =>
@@ -385,40 +468,10 @@ public class EventToTimeSpanConverter
 
         var sorted = meetings.OrderBy(m => m.Start).ToList();
 
-        // First pass: reposition the break so it fits between surrounding meetings
-        for (var i = 0; i < sorted.Count; i++)
-        {
-            if (sorted[i].Category != TimeSlotCategory.Break)
-                continue;
-
-            var breakMeeting = sorted[i];
-            var breakStart = breakMeeting.Start;
-
-            // If the preceding meeting overlaps, push the break forward to after it ends
-            if (i > 0 && sorted[i - 1].End > breakStart)
-            {
-                breakStart = sorted[i - 1].End;
-                Log.Debug("Break pushed forward to {NewStart} due to overlap with {Subject}",
-                    breakStart, sorted[i - 1].Subject);
-            }
-
-            // If the following meeting starts before the break would end, push the break backward
-            var breakEnd = breakStart.AddMinutes(MinBreakMinutes);
-            if (i < sorted.Count - 1 && sorted[i + 1].Start < breakEnd)
-            {
-                breakStart = sorted[i + 1].Start.AddMinutes(-MinBreakMinutes);
-                Log.Debug("Break pushed backward to {NewStart} due to overlap with {Subject}",
-                    breakStart, sorted[i + 1].Subject);
-            }
-
-            // Clamp within the allowed break window
-            breakStart = breakStart < BreakWindowStart ? BreakWindowStart : breakStart;
-            var maxStart = BreakWindowEnd.AddMinutes(-MinBreakMinutes);
-            breakStart = breakStart > maxStart ? maxStart : breakStart;
-
-            if (breakStart != breakMeeting.Start)
-                sorted[i] = new CalendarMeeting(breakStart, breakStart.AddMinutes(MinBreakMinutes), breakMeeting.Subject, breakMeeting.Category, breakMeeting.TicketNumber);
-        }
+        // First pass: move the break into a free gap that does not overlap any other block
+        var breakIdx = sorted.FindIndex(m => m.Category == TimeSlotCategory.Break);
+        if (breakIdx >= 0)
+            sorted[breakIdx] = FitBreak(sorted[breakIdx], sorted.Where((_, i) => i != breakIdx).ToList());
 
         // Second pass: resolve any remaining meeting-vs-meeting overlaps.
         // Priority rules:
@@ -503,263 +556,103 @@ public class EventToTimeSpanConverter
         return resolved;
     }
 
-    /// <summary>
-    /// Create work slots with lunch break detection
-    /// </summary>
-    private void CreateWorkSlotsWithNoonBreak(List<TimeSlot> timeSlots, DateOnly date, TimeOnly workStart, TimeOnly workEnd, List<Event> workEvents, List<(DateTime Time, string Branch, string? Ticket)> branchHistory)
-    {
-        // Check if work day spans the lunch window
-        if (workStart >= BreakWindowEnd || workEnd <= BreakWindowStart)
-        {
-            // Work doesn't span lunch window - single slot
-            var slotTime = date.ToDateTime(workStart);
-            timeSlots.Add(new TimeSlot
-            {
-                Date = date,
-                StartTime = workStart,
-                EndTime = workEnd,
-                TicketNr = GetTicketNumberFromEvents(workEvents, slotTime, date, branchHistory),
-                Text = GetWorkDescription(workEvents),
-                Source = GetSourceFromCategory(TimeSlotCategory.Work),
-                Category = TimeSlotCategory.Work
-            });
-            return;
-        }
+	/// <summary>
+	/// Create a work slot for a gap. Ticket priority: events inside the slot, then the branch active
+	/// at slot start, then any event of the day.
+	/// </summary>
+	private TimeSlot CreateWorkSlot(DateOnly date, TimeOnly start, TimeOnly end, List<Event> workEvents, List<(DateTime Time, string Branch, string? Ticket)> branchHistory)
+	{
+		var slotEvents = workEvents
+			.Where(e => TimeOnly.FromDateTime(e.Timestamp) >= start && TimeOnly.FromDateTime(e.Timestamp) < end)
+			.ToList();
+		var slotTime = date.ToDateTime(start);
 
-        // Work spans lunch window - need break
-        var breakStart = DefaultBreakStart;
-        var breakEnd = DefaultBreakEnd;
+		// Branches/commits are often created after the work started, so a later ticket of the same day
+		// is a better match than the branch that happened to be checked out at slot time.
+		var laterEvents = workEvents.Where(e => TimeOnly.FromDateTime(e.Timestamp) >= end).OrderBy(e => e.Timestamp).ToList();
+		var ticket = GetTicketFromEvents(slotEvents)
+			?? laterEvents.Select(e => GetTicketFromEvents([e])).FirstOrDefault(t => t != null)
+			?? GetTicketForTimeFromBranchHistory(slotTime, branchHistory)
+			?? GetTicketFromEvents(workEvents);
 
-        // Find appropriate break from work events gap
-        var lunchGap = FindLunchBreakGap(workEvents);
-        if (lunchGap.HasValue)
-        {
-            breakStart = lunchGap.Value.Start;
-            breakEnd = lunchGap.Value.End;
-            Log.Information("Found lunch break gap: {Start} - {End}", breakStart, breakEnd);
-        }
-        else
-        {
-            Log.Information("No appropriate lunch gap found, using default: {Start} - {End}", breakStart, breakEnd);
-        }
+		return new TimeSlot
+		{
+			Date = date,
+			StartTime = start,
+			EndTime = end,
+			TicketNr = TicketParser.EnsureHashPrefix(ticket),
+			Text = GetWorkDescription(slotEvents.Count > 0 ? slotEvents : workEvents),
+			Source = GetSourceFromCategory(TimeSlotCategory.Work),
+			Category = TimeSlotCategory.Work,
+			Metadata = GetMetadataFromEvents(slotEvents, branchHistory, slotTime)
+		};
+	}
 
-        // Adjust break to not exceed work boundaries
-        if (breakStart < workStart)
-            breakStart = workStart;
-        if (breakEnd > workEnd)
-            breakEnd = workEnd;
+	/// <summary>
+	/// Pick a lunch break: from gaps between meetings in the break window if there are any,
+	/// otherwise from a gap between work events, otherwise the default.
+	/// </summary>
+	private static (TimeOnly Start, TimeOnly End) DetectLunchBreak(List<CalendarMeeting> meetings, List<Event> workEvents)
+	{
+		var meetingsInWindow = meetings
+			.Where(m => m.End > BreakWindowStart && m.Start < BreakWindowEnd)
+			.OrderBy(m => m.Start)
+			.ToList();
 
-        // Split into morning and afternoon
-        var morningEvents = workEvents.Where(e => TimeOnly.FromDateTime(e.Timestamp) < breakStart).ToList();
-        var afternoonEvents = workEvents.Where(e => TimeOnly.FromDateTime(e.Timestamp) >= breakEnd).ToList();
+		var detected = meetingsInWindow.Count > 0
+			? FindLunchGapBetweenMeetings(meetingsInWindow)
+			: FindLunchBreakGap(workEvents);
 
-        // Morning slot
-        if (workStart < breakStart)
-        {
-            var morningSlotTime = date.ToDateTime(workStart);
-            timeSlots.Add(new TimeSlot
-            {
-                Date = date,
-                StartTime = workStart,
-                EndTime = breakStart,
-                TicketNr = GetTicketNumberFromEvents(morningEvents.Any() ? morningEvents : workEvents, morningSlotTime, date, branchHistory),
-                Text = GetWorkDescription(morningEvents.Any() ? morningEvents : workEvents),
-                Source = GetSourceFromCategory(TimeSlotCategory.Work),
-                Category = TimeSlotCategory.Work
-            });
-        }
+		return detected ?? (DefaultBreakStart, DefaultBreakEnd);
+	}
 
-        // Afternoon slot
-        if (breakEnd < workEnd)
-        {
-            var afternoonSlotTime = date.ToDateTime(breakEnd);
-            timeSlots.Add(new TimeSlot
-            {
-                Date = date,
-                StartTime = breakEnd,
-                EndTime = workEnd,
-                TicketNr = GetTicketNumberFromEvents(afternoonEvents.Any() ? afternoonEvents : (morningEvents.Any() ? morningEvents : workEvents), afternoonSlotTime, date, branchHistory),
-                Text = afternoonEvents.Any() ? GetWorkDescription(afternoonEvents) : GetWorkDescription(morningEvents.Any() ? morningEvents : workEvents),
-                Source = GetSourceFromCategory(TimeSlotCategory.Work),
-                Category = TimeSlotCategory.Work
-            });
-        }
-    }
+	/// <summary>
+	/// Find a 30-60 minute gap inside the break window between commits/work events
+	/// </summary>
+	private static (TimeOnly Start, TimeOnly End)? FindLunchBreakGap(List<Event> workEvents)
+	{
+		var times = workEvents
+			.Select(e => TimeOnly.FromDateTime(e.Timestamp))
+			.Where(t => t >= BreakWindowStart && t <= BreakWindowEnd)
+			.Order()
+			.ToList();
 
-    /// <summary>
-    /// Find an appropriate lunch break gap in work events
-    /// </summary>
-    private (TimeOnly Start, TimeOnly End)? FindLunchBreakGap(List<Event> workEvents)
-    {
-        if (workEvents.Count == 0)
-            return null;
+		for (var i = 0; i < times.Count - 1; i++)
+		{
+			if (IsBreakSizedGap(times[i], times[i + 1]))
+				return (times[i], times[i].AddMinutes(MinBreakMinutes));
+		}
 
-        var eventsInWindow = workEvents
-            .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= BreakWindowStart &&
-                       TimeOnly.FromDateTime(e.Timestamp) <= BreakWindowEnd)
-            .OrderBy(e => e.Timestamp)
-            .ToList();
+		return null;
+	}
 
-        if (eventsInWindow.Count < 2)
-            return null;
+	/// <summary>
+	/// Find a 30-60 minute gap inside the break window between, before or after meetings
+	/// </summary>
+	private static (TimeOnly Start, TimeOnly End)? FindLunchGapBetweenMeetings(List<CalendarMeeting> meetingsInWindow)
+	{
+		var gaps = new List<(TimeOnly Start, TimeOnly End)>();
+		for (var i = 0; i < meetingsInWindow.Count - 1; i++)
+			gaps.Add((meetingsInWindow[i].End, meetingsInWindow[i + 1].Start));
+		gaps.Add((BreakWindowStart, meetingsInWindow[0].Start));
+		gaps.Add((meetingsInWindow[^1].End, BreakWindowEnd));
 
-        // Look for gaps between events
-        for (int i = 0; i < eventsInWindow.Count - 1; i++)
-        {
-            var gapStart = TimeOnly.FromDateTime(eventsInWindow[i].Timestamp);
-            var gapEnd = TimeOnly.FromDateTime(eventsInWindow[i + 1].Timestamp);
-            var gapDuration = (gapEnd - gapStart).TotalMinutes;
+		foreach (var (rawStart, rawEnd) in gaps)
+		{
+			var start = rawStart < BreakWindowStart ? BreakWindowStart : rawStart;
+			var end = rawEnd > BreakWindowEnd ? BreakWindowEnd : rawEnd;
+			if (IsBreakSizedGap(start, end))
+			{
+				Log.Information("Detected lunch break from meeting gap: {Start} - {End}", start, start.AddMinutes(MinBreakMinutes));
+				return (start, start.AddMinutes(MinBreakMinutes));
+			}
+		}
 
-            // Check if gap is appropriate for lunch break
-            if (gapDuration >= MinBreakMinutes && gapDuration <= MaxBreakMinutes)
-            {
-                return (gapStart, gapStart.AddMinutes(MinBreakMinutes));
-            }
-        }
+		return null;
+	}
 
-        return null;
-    }
-
-    /// <summary>
-    /// Create granular slots with meetings and work periods in between
-    /// </summary>
-    private void CreateGranularSlotsWithMeetings(List<TimeSlot> timeSlots, DateOnly date, TimeOnly workStart, TimeOnly workEnd, List<Event> workEvents, List<CalendarMeeting> meetings, List<(DateTime Time, string Branch, string? Ticket)> branchHistory)
-    {
-        // Check if lunch break is already in meetings (from WindowsEventSource)
-        var hasLunchBreakMeeting = meetings.Any(m => m.Subject == "Lunch Break");
-
-        // Detect lunch break from meetings ONLY if not already present
-        var lunchBreak = hasLunchBreakMeeting ? null : DetectLunchBreakFromMeetings(meetings);
-
-        if (hasLunchBreakMeeting)
-        {
-            Log.Debug("Lunch break already in meetings list, skipping detection");
-        }
-
-        var currentTime = workStart;
-        var lunchBreakInserted = false;
-
-        foreach (var meeting in meetings)
-        {
-            // Check if we should insert lunch break before this meeting
-            if (!lunchBreakInserted && lunchBreak.HasValue && currentTime < lunchBreak.Value.Start && meeting.Start >= lunchBreak.Value.End)
-            {
-                // Add work before lunch
-                if (currentTime < lunchBreak.Value.Start)
-                {
-                    var eventsBeforeLunch = workEvents
-                        .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime &&
-                                   TimeOnly.FromDateTime(e.Timestamp) < lunchBreak.Value.Start)
-                        .ToList();
-
-                    var slotTime = date.ToDateTime(currentTime);
-                    timeSlots.Add(new TimeSlot
-                    {
-                        Date = date,
-                        StartTime = currentTime,
-                        EndTime = lunchBreak.Value.Start,
-                        TicketNr = GetTicketNumberFromEvents(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents, slotTime, date, branchHistory),
-                        Text = GetWorkDescription(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents),
-                        Location = Location.WV,
-                        Category = TimeSlotCategory.Work
-                    });
-                }
-
-                currentTime = lunchBreak.Value.End;
-                lunchBreakInserted = true;
-            }
-
-            // Add work slot before meeting if there's a gap
-            if (currentTime < meeting.Start)
-            {
-                var eventsInPeriod = workEvents
-                    .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime &&
-                               TimeOnly.FromDateTime(e.Timestamp) < meeting.Start)
-                    .ToList();
-
-                var slotTime = date.ToDateTime(currentTime);
-                timeSlots.Add(new TimeSlot
-                {
-                    Date = date,
-                    StartTime = currentTime,
-                    EndTime = meeting.Start,
-                    TicketNr = GetTicketNumberFromEvents(eventsInPeriod.Any() ? eventsInPeriod : workEvents, slotTime, date, branchHistory),
-                    Text = GetWorkDescription(eventsInPeriod.Any() ? eventsInPeriod : workEvents),
-                    Location = Location.WV,
-                    Source = GetSourceFromCategory(TimeSlotCategory.Work),
-                    Category = TimeSlotCategory.Work,
-                    Metadata = GetMetadataFromEvents(eventsInPeriod.Any() ? eventsInPeriod : workEvents, branchHistory, slotTime)
-                });
-            }
-
-            // Add meeting slot with appropriate category
-            var category = meeting.Category;
-            timeSlots.Add(new TimeSlot
-            {
-                Date = date,
-                StartTime = meeting.Start,
-                EndTime = meeting.End,
-                TicketNr = meeting.TicketNumber,
-                Text = meeting.Subject,
-                Source = GetSourceFromCategory(category),
-                Category = category
-            });
-
-            currentTime = meeting.End;
-        }
-
-        // If lunch break wasn't inserted yet and we have time for it
-        if (!lunchBreakInserted && lunchBreak.HasValue && currentTime < lunchBreak.Value.Start && lunchBreak.Value.End <= workEnd)
-        {
-            // Add work before lunch
-            if (currentTime < lunchBreak.Value.Start)
-            {
-                var eventsBeforeLunch = workEvents
-                    .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime &&
-                               TimeOnly.FromDateTime(e.Timestamp) < lunchBreak.Value.Start)
-                    .ToList();
-
-                var slotTime = date.ToDateTime(currentTime);
-                timeSlots.Add(new TimeSlot
-                {
-                    Date = date,
-                    StartTime = currentTime,
-                    EndTime = lunchBreak.Value.Start,
-                    TicketNr = GetTicketNumberFromEvents(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents, slotTime, date, branchHistory),
-                    Text = GetWorkDescription(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents),
-                    Location = Location.WV,
-                    Source = GetSourceFromCategory(TimeSlotCategory.Work),
-                    Category = TimeSlotCategory.Work,
-                    Metadata = GetMetadataFromEvents(eventsBeforeLunch.Any() ? eventsBeforeLunch : workEvents, branchHistory, slotTime)
-                });
-            }
-
-            currentTime = lunchBreak.Value.End;
-        }
-
-        // Add final work slot if there's time remaining
-        if (currentTime < workEnd)
-        {
-            var eventsInPeriod = workEvents
-                .Where(e => TimeOnly.FromDateTime(e.Timestamp) >= currentTime &&
-                           TimeOnly.FromDateTime(e.Timestamp) <= workEnd)
-                .ToList();
-
-            var slotTime = date.ToDateTime(currentTime);
-            timeSlots.Add(new TimeSlot
-            {
-                Date = date,
-                StartTime = currentTime,
-                EndTime = workEnd,
-                TicketNr = GetTicketNumberFromEvents(eventsInPeriod.Any() ? eventsInPeriod : workEvents, slotTime, date, branchHistory),
-                Text = GetWorkDescription(eventsInPeriod.Any() ? eventsInPeriod : workEvents),
-                Location = Location.WV,
-                Source = GetSourceFromCategory(TimeSlotCategory.Work),
-                Category = TimeSlotCategory.Work,
-                Metadata = GetMetadataFromEvents(eventsInPeriod.Any() ? eventsInPeriod : workEvents, branchHistory, slotTime)
-            });
-        }
-    }
+	private static bool IsBreakSizedGap(TimeOnly start, TimeOnly end) =>
+		end > start && (end - start).TotalMinutes is >= MinBreakMinutes and <= MaxBreakMinutes;
 
     /// <summary>
     /// Returns true for categories produced by work-producing sources (Git and Edge Browser).
@@ -835,152 +728,9 @@ public class EventToTimeSpanConverter
     }
 
     /// <summary>
-    /// Detect lunch break from calendar meetings or use default
+    /// Extract ticket number from event metadata
     /// </summary>
-    private (TimeOnly Start, TimeOnly End)? DetectLunchBreakFromMeetings(List<CalendarMeeting> meetings)
-    {
-        if (meetings.Count == 0)
-            return (DefaultBreakStart, DefaultBreakEnd);
-
-        // Look for gaps between meetings in the lunch window
-        var meetingsInWindow = meetings
-            .Where(m => m.End > BreakWindowStart && m.Start < BreakWindowEnd)
-            .OrderBy(m => m.Start)
-            .ToList();
-
-        if (meetingsInWindow.Count == 0)
-        {
-            // No meetings in lunch window - use default
-            return (DefaultBreakStart, DefaultBreakEnd);
-        }
-
-        // Check gaps between meetings
-        for (int i = 0; i < meetingsInWindow.Count - 1; i++)
-        {
-            var gapStart = meetingsInWindow[i].End;
-            var gapEnd = meetingsInWindow[i + 1].Start;
-
-            // Gap must be within lunch window
-            if (gapStart < BreakWindowStart)
-                gapStart = BreakWindowStart;
-            if (gapEnd > BreakWindowEnd)
-                gapEnd = BreakWindowEnd;
-
-            var gapDuration = (gapEnd - gapStart).TotalMinutes;
-
-            // Check if gap meets break criteria (30-60 min)
-            if (gapDuration >= MinBreakMinutes && gapDuration <= MaxBreakMinutes)
-            {
-                Log.Information("Detected lunch break from meeting gap: {Start} - {End} ({Duration} min)",
-                    gapStart, gapStart.AddMinutes(MinBreakMinutes), gapDuration);
-                return (gapStart, gapStart.AddMinutes(MinBreakMinutes));
-            }
-        }
-
-        // Check if there's time before first meeting
-        if (meetingsInWindow[0].Start > BreakWindowStart)
-        {
-            var gapStart = BreakWindowStart;
-            var gapEnd = meetingsInWindow[0].Start;
-            var gapDuration = (gapEnd - gapStart).TotalMinutes;
-
-            if (gapDuration >= MinBreakMinutes && gapDuration <= MaxBreakMinutes)
-            {
-                Log.Information("Detected lunch break before meetings: {Start} - {End} ({Duration} min)",
-                    gapStart, gapStart.AddMinutes(MinBreakMinutes), gapDuration);
-                return (gapStart, gapStart.AddMinutes(MinBreakMinutes));
-            }
-        }
-
-        // Check if there's time after last meeting
-        var lastMeeting = meetingsInWindow[^1];
-        if (lastMeeting.End < BreakWindowEnd)
-        {
-            var gapStart = lastMeeting.End;
-            var gapEnd = BreakWindowEnd;
-            var gapDuration = (gapEnd - gapStart).TotalMinutes;
-
-            if (gapDuration >= MinBreakMinutes && gapDuration <= MaxBreakMinutes)
-            {
-                Log.Information("Detected lunch break after meetings: {Start} - {End} ({Duration} min)",
-                    gapStart, gapStart.AddMinutes(MinBreakMinutes), gapDuration);
-                return (gapStart, gapStart.AddMinutes(MinBreakMinutes));
-            }
-        }
-
-        // No appropriate gap found - use default
-        return (DefaultBreakStart, DefaultBreakEnd);
-    }
-
-    /// <summary>
-    /// Round time UP to nearest interval
-    /// </summary>
-    private TimeOnly RoundUpToNearest(TimeOnly time, int minutes)
-    {
-        var totalMinutes = time.Hour * 60 + time.Minute;
-        var roundedMinutes = (int)Math.Ceiling(totalMinutes / (double)minutes) * minutes;
-
-        if (roundedMinutes >= 24 * 60)
-        {
-            roundedMinutes = 24 * 60 - minutes;
-        }
-
-        return new TimeOnly(roundedMinutes / 60, roundedMinutes % 60);
-    }
-
-    /// <summary>
-    /// Round time UP to next quarter hour (00, 15, 30, 45)
-    /// </summary>
-    private TimeOnly RoundUpToNextQuarterHour(TimeOnly time)
-    {
-        var totalMinutes = time.Hour * 60 + time.Minute;
-        var roundedMinutes = (int)Math.Ceiling(totalMinutes / 15.0) * 15;
-
-        if (roundedMinutes >= 24 * 60)
-        {
-            roundedMinutes = 24 * 60 - 15;
-        }
-
-        return new TimeOnly(roundedMinutes / 60, roundedMinutes % 60);
-    }
-
-    /// <summary>
-    /// Round time DOWN to nearest interval
-    /// </summary>
-    private TimeOnly RoundDownToNearest(TimeOnly time, int minutes)
-    {
-        var totalMinutes = time.Hour * 60 + time.Minute;
-        var roundedMinutes = (int)Math.Floor(totalMinutes / (double)minutes) * minutes;
-        return new TimeOnly(roundedMinutes / 60, roundedMinutes % 60);
-    }
-
-    /// <summary>
-    /// Round time to nearest interval
-    /// </summary>
-    private TimeOnly RoundToNearest(TimeOnly time, int minutes)
-    {
-        var totalMinutes = time.Hour * 60 + time.Minute;
-        var roundedMinutes = (int)Math.Round(totalMinutes / (double)minutes) * minutes;
-
-        if (roundedMinutes >= 24 * 60)
-        {
-            roundedMinutes = 24 * 60 - minutes;
-        }
-
-        return new TimeOnly(roundedMinutes / 60, roundedMinutes % 60);
-    }
-
-    /// <summary>
-    /// Extract ticket number from event metadata, with fallback to current branch ticket
-    /// </summary>
-    private string? GetTicketNumber(Event? evt, string? fallbackTicketNumber = null)
-    {
-        if (evt?.Metadata != null && evt.Metadata.TryGetValue("TicketNumber", out var ticket))
-        {
-            return ticket;
-        }
-        return fallbackTicketNumber;
-    }
+    private static string? GetTicketNumber(Event? evt) => evt?.Metadata?.GetValueOrDefault("TicketNumber");
 
     /// <summary>
     /// Get source name from category
@@ -1063,127 +813,49 @@ public class EventToTimeSpanConverter
         return [timeSlot];
     }
 
-    /// <summary>
-    /// Get ticket number from a list of events, with fallback to branch active at specified time
-    /// </summary>
-    private string? GetTicketNumberFromEvents(List<Event> events, DateTime slotTime, DateOnly date, List<(DateTime Time, string Branch, string? Ticket)> branchHistory)
-    {
-        // Prefer ticket from commit events (more specific than branch-level tickets)
-        var commitWithTicket = events
-            .Where(e => e.EventType == EventType.Commit)
-            .FirstOrDefault(e => GetTicketNumber(e) != null);
+	/// <summary>
+	/// Ticket from events: prefer commits (more specific than branch-level tickets), then any event
+	/// </summary>
+	private static string? GetTicketFromEvents(List<Event> events) =>
+		events.Where(e => e.EventType == EventType.Commit).Select(GetTicketNumber).FirstOrDefault(t => t != null)
+		?? events.Select(GetTicketNumber).FirstOrDefault(t => t != null);
 
-        var ticket = GetTicketNumber(commitWithTicket);
+	/// <summary>
+	/// Generate description for time slot based on events: the most detailed commit message, else the first event
+	/// </summary>
+	private static string GetWorkDescription(List<Event> workEvents)
+	{
+		var evt = workEvents.Where(e => e.EventType == EventType.Commit).MaxBy(e => e.Description?.Length ?? 0)
+			?? workEvents.FirstOrDefault();
 
-        // Fallback to any event with a ticket (including branch switches)
-        if (string.IsNullOrEmpty(ticket))
-        {
-            var eventWithTicket = events.FirstOrDefault(e => GetTicketNumber(e) != null);
-            ticket = GetTicketNumber(eventWithTicket);
-        }
+		if (evt == null)
+			return "Work";
 
-        // Last resort: use branch that was active at this time
-        if (string.IsNullOrEmpty(ticket))
-        {
-            ticket = GetTicketForTimeFromBranchHistory(slotTime, branchHistory);
+		return string.IsNullOrWhiteSpace(evt.Description) ? evt.EventType.ToString() : evt.Description;
+	}
 
-            if (!string.IsNullOrEmpty(ticket))
-            {
-                Log.Debug("No ticket in {Count} events at {Time}, using branch ticket {Ticket}",
-                    events.Count, slotTime, ticket);
-            }
-        }
+	/// <summary>
+	/// Extract metadata (Repository, Branch) from Git events, falling back to the branch active at slot start
+	/// </summary>
+	private static Dictionary<string, string>? GetMetadataFromEvents(List<Event> workEvents, List<(DateTime Time, string Branch, string? Ticket)> branchHistory, DateTime slotTime)
+	{
+		var metadata = new Dictionary<string, string>();
 
-        return TicketParser.EnsureHashPrefix(ticket);
-    }
+		var gitEvent = workEvents.FirstOrDefault(e => e.EventType is EventType.Commit or EventType.BranchSwitch);
+		foreach (var key in (string[])["Repository", "Branch"])
+		{
+			if (gitEvent?.Metadata?.TryGetValue(key, out var value) == true)
+				metadata[key] = value;
+		}
 
-    /// <summary>
-    /// Generate description for time slot based on events
-    /// </summary>
-    private string GetWorkDescription(List<Event> workEvents)
-    {
-        if (workEvents.Count == 0)
-        {
-            return "Work";
-        }
+		if (!metadata.ContainsKey("Branch"))
+		{
+			// Value tuples: MaxBy throws on an empty sequence instead of returning default
+			var earlier = branchHistory.Where(b => b.Time <= slotTime).ToList();
+			if (earlier.Count > 0 && earlier.MaxBy(b => b.Time).Branch is { Length: > 0 } branch)
+				metadata["Branch"] = branch;
+		}
 
-        // Filter out lunch break and other skeleton events - we only want actual work events
-        var actualWorkEvents = workEvents
-            .Where(e => e.EventType != EventType.LunchBreakStart &&
-                       e.EventType != EventType.LunchBreakEnd &&
-                       e.EventType != EventType.Boot &&
-                       e.EventType != EventType.Shutdown &&
-                       e.EventType != EventType.CalendarMeetingStart &&
-                       e.EventType != EventType.CalendarMeetingEnd &&
-                       e.EventType != EventType.TicketStart &&
-                       e.EventType != EventType.TicketEnd)
-            .ToList();
-
-        if (actualWorkEvents.Count == 0)
-        {
-            return "Work";
-        }
-
-        // Prefer commit messages
-        var commits = actualWorkEvents.Where(e => e.EventType == EventType.Commit).ToList();
-        if (commits.Any())
-        {
-            // Use the most recent or most detailed commit message
-            var bestCommit = commits
-                .OrderByDescending(e => e.Description?.Length ?? 0)
-                .First();
-            return bestCommit.Description ?? bestCommit.EventType.ToString();
-        }
-
-        // Fall back to first actual work event's description
-        var firstEvent = actualWorkEvents[0];
-        return !string.IsNullOrWhiteSpace(firstEvent.Description)
-            ? firstEvent.Description
-            : firstEvent.EventType.ToString();
-    }
-
-    /// <summary>
-    /// Extract metadata from work events (Repository, Branch, etc.)
-    /// </summary>
-    private Dictionary<string, string>? GetMetadataFromEvents(List<Event> workEvents, List<(DateTime Time, string Branch, string? Ticket)> branchHistory, DateTime slotTime)
-    {
-        if (workEvents.Count == 0)
-            return null;
-
-        var metadata = new Dictionary<string, string>();
-
-        // Prefer metadata from Git commit events
-        var gitEvent = workEvents.FirstOrDefault(e => e.EventType == EventType.Commit || e.EventType == EventType.BranchSwitch);
-
-        if (gitEvent?.Metadata != null)
-        {
-            // Copy Repository
-            if (gitEvent.Metadata.TryGetValue("Repository", out var repository))
-            {
-                metadata["Repository"] = repository;
-            }
-
-            // Copy Branch if available
-            if (gitEvent.Metadata.TryGetValue("Branch", out var branch))
-            {
-                metadata["Branch"] = branch;
-            }
-        }
-
-        // If no branch in events, get from branch history
-        if (!metadata.ContainsKey("Branch") && branchHistory.Count > 0)
-        {
-            var activeBranch = branchHistory
-                .Where(b => b.Time <= slotTime)
-                .OrderByDescending(b => b.Time)
-                .FirstOrDefault();
-
-            if (activeBranch != default && !string.IsNullOrEmpty(activeBranch.Branch))
-            {
-                metadata["Branch"] = activeBranch.Branch;
-            }
-        }
-
-        return metadata.Count > 0 ? metadata : null;
-    }
+		return metadata.Count > 0 ? metadata : null;
+	}
 }

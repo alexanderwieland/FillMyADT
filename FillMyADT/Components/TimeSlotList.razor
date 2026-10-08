@@ -1,6 +1,4 @@
-@using FillMyADT.Models
-
-@if (IsLoading)
+﻿@if (IsLoading)
 {
     <div class="loading-container">
         <div class="spinner"></div>
@@ -16,7 +14,7 @@ else if (TimeSlots == null || !TimeSlots.Any())
 else
 {
     <div class="timeslot-list">
-        <h3>Time Slots (@TimeSlots.Count slots, @FormatTotalDuration(TimeSlots) total)</h3>
+        <h3>Time Slots (@TimeSlots.Count slots, @TimeHelper.FormatDuration(TimeSpan.FromMinutes(TimeSlots.Sum(s => s.Duration.TotalMinutes))) total)</h3>
 
         <div class="timeslots">
             @foreach (var slot in TimeSlots)
@@ -27,7 +25,7 @@ else
                             @slot.StartTime.ToString("HH:mm") - @slot.EndTime.ToString("HH:mm")
                         </div>
                         <div class="duration">
-                            @slot.FormattedDuration
+                            @TimeHelper.FormatDuration(slot.Duration)
                         </div>
                     </div>
                     <div class="timeslot-details">
@@ -36,21 +34,14 @@ else
                             {
                                 <div class="source-badge source-@slot.Source.ToLowerInvariant().Replace(" ", "-")">@slot.Source</div>
                             }
-                            @* Show ticket badge for Git timeslots - always display to highlight missing tickets *@
-                            @if (slot.Source == "Git")
-                            {
-                                @if (!string.IsNullOrEmpty(slot.TicketNr))
-                                {
-                                    <div class="ticket-badge">#@slot.TicketNr.TrimStart('#')</div>
-                                }
-                                else
-                                {
-                                    <div class="ticket-badge ticket-missing">⚠️ No Ticket</div>
-                                }
-                            }
-                            else if (!string.IsNullOrEmpty(slot.TicketNr))
+                            @if (!string.IsNullOrEmpty(slot.TicketNr))
                             {
                                 <div class="ticket-badge">#@slot.TicketNr.TrimStart('#')</div>
+                            }
+                            else if (slot.Source == "Git")
+                            {
+                                @* Highlight Git slots that are missing a ticket *@
+                                <div class="ticket-badge ticket-missing">⚠️ No Ticket</div>
                             }
                             <div class="timeslot-text">@slot.Text</div>
                         </div>
@@ -97,19 +88,6 @@ else
 
     [Parameter]
     public bool IsLoading { get; set; }
-
-    private static string FormatTotalDuration(IReadOnlyList<TimeSlot> slots)
-    {
-        var totalMinutes = (int)slots.Sum(s => s.Duration.TotalMinutes);
-        var hours = totalMinutes / 60;
-        var minutes = totalMinutes % 60;
-
-        if (hours > 0)
-        {
-            return minutes > 0 ? $"{hours}h {minutes}m" : $"{hours}h";
-        }
-        return $"{minutes}m";
-    }
 }
 
 <style>
@@ -283,16 +261,6 @@ else
         animation: pulse 2s ease-in-out infinite;
     }
 
-    .repo-badge {
-        background-color: #6c757d; /* Gray background for repository */
-        color: #fff;
-        font-weight: 600;
-        font-size: 11px;
-        padding: 3px 8px;
-        border-radius: 3px;
-        display: inline-block;
-    }
-
     @@keyframes pulse {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.7; }
@@ -357,36 +325,12 @@ else
         font-weight: 500;
     }
 
-    .no-events {
-        padding: 20px;
-        text-align: center;
-        color: #6c757d;
-        font-size: 13px;
-    }
-
-    .loading-container {
-        padding: 40px 20px;
-        text-align: center;
-        color: #6c757d;
-    }
-
-        .loading-container p {
-            margin-top: 15px;
-            font-size: 13px;
-        }
-
-    .spinner {
-        border: 3px solid #f3f3f3;
-        border-top: 3px solid #0078d4;
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
-        animation: spin 1s linear infinite;
-        margin: 0 auto;
-    }
-
-    @@keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-    }
+	/* Compact single-line rows */
+	.timeslot-item { display: flex; align-items: center; gap: 8px; padding: 3px 8px; margin-bottom: 2px; min-height: 0; }
+	.timeslot-time { display: flex; gap: 6px; align-items: baseline; white-space: nowrap; min-width: 0; padding: 0; }
+	.timeslot-details { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; overflow: hidden; }
+	.timeslot-header { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; margin: 0; }
+	.timeslot-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+	.timeslot-metadata { display: flex; flex-wrap: nowrap; gap: 4px; margin: 0; flex-shrink: 0; }
+	.metadata-tag, .source-badge, .ticket-badge { padding: 1px 6px; font-size: 0.75em; white-space: nowrap; }
 </style>

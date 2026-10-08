@@ -194,7 +194,7 @@ public class GitEventSource : IEventSource
             // OPTIMIZATION: Add limit to prevent fetching thousands of commits
             var output = await RunGitCommandAsync(
                 repoPath,
-                $"log {branchesArg} --since=\"{sinceArg}\" --until=\"{untilArg}\" --format=\"%H|%aI|%s|%an|%ae|%D\" -n {MaxCommitsPerRepo}",
+                $"log {branchesArg} --since=\"{sinceArg}\" --until=\"{untilArg}\" --format=\"%H|%aI|%an|%ae|%D|%s\" -n {MaxCommitsPerRepo}",
                 cancellationToken);
 
             if (string.IsNullOrWhiteSpace(output))
@@ -204,11 +204,12 @@ public class GitEventSource : IEventSource
 
             foreach (var line in lines)
             {
-                var parts = line.Split('|');
-                if (parts.Length >= 5 && DateTime.TryParse(parts[1], out var timestamp))
+                // Subject is last and split with a limit, so '|' inside commit messages is preserved
+                var parts = line.TrimEnd('\r').Split('|', 6);
+                if (parts.Length == 6 && DateTime.TryParse(parts[1], out var timestamp))
                 {
-                    var author = parts[3];
-                    var email = parts[4];
+                    var author = parts[2];
+                    var email = parts[3];
 
                     if (!string.IsNullOrWhiteSpace(_config.FilterByAuthorName) &&
                         !author.Contains(_config.FilterByAuthorName, StringComparison.OrdinalIgnoreCase))
@@ -222,8 +223,8 @@ public class GitEventSource : IEventSource
                         continue;
                     }
 
-                    var commitMessage = parts[2];
-                    var branchRefs = parts.Length > 5 ? parts[5] : string.Empty;
+                    var commitMessage = parts[5];
+                    var branchRefs = parts[4];
 
                     var metadata = new Dictionary<string, string>
                     {
@@ -614,7 +615,7 @@ public class GitEventSource : IEventSource
     /// Handle rebase-related reflog actions.
     /// Start: resolves the target commit hash to a subject and branch refs.
     /// Finish: extracts the branch that was rebased.
-    /// All other rebase steps (pick, squash, amend, �) are skipped as noise.
+    /// All other rebase steps (pick, squash, amend, ...) are skipped as noise.
     /// </summary>
     private async Task<Event?> HandleRebaseActionAsync(string action, string commitHash, DateTime timestamp, string repoPath, string repoName, CancellationToken cancellationToken)
     {
@@ -701,7 +702,7 @@ public class GitEventSource : IEventSource
             };
         }
 
-        // All other mid-rebase steps (pick, squash, amend, �) are noise � skip them
+        // All other mid-rebase steps (pick, squash, amend, ...) are noise - skip them
         Log.Debug("Skipping mid-rebase reflog entry: {Action}", action);
         return null;
     }
@@ -810,21 +811,29 @@ public class GitEventSource : IEventSource
     }
 
     /// <summary>
-    /// Get the ticket number from the current branch name
+    /// Find the newest checkout reflog entry at or before <paramref name="time"/> (entries are newest-first)
     /// </summary>
-    public async Task<string?> GetCurrentBranchTicketNumberAsync(CancellationToken cancellationToken = default)
+    private static string? FindCheckoutAtOrBefore(string? reflogOutput, DateTime time)
     {
-        var branchName = await GetCurrentBranchAsync(cancellationToken);
-        if (string.IsNullOrWhiteSpace(branchName))
+        if (string.IsNullOrWhiteSpace(reflogOutput))
             return null;
 
-        var ticketNumber = TicketParser.FromGitText(branchName);
-        Log.Debug("Current branch: {Branch}, Ticket: {Ticket}", branchName, ticketNumber ?? "none");
-        return ticketNumber;
+        foreach (var line in reflogOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!TryParseReflogLine(line, out var parsed) || parsed.Timestamp > time
+                || !parsed.Action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var branchName = ExtractBranchNameFromCheckout(parsed.Action);
+            if (!string.IsNullOrEmpty(branchName))
+                return branchName;
+        }
+
+        return null;
     }
 
     /// <summary>
-    /// Get the branch that was active at a specific time by examining the default repository's reflog history.
+    /// Get the branch that was active at a specific time by examining
     /// Uses a date-scoped query so past days are found regardless of how many operations happened since.
     /// </summary>
     public async Task<string?> GetBranchAtTimeAsync(DateTime time, CancellationToken cancellationToken = default)
@@ -842,68 +851,25 @@ public class GitEventSource : IEventSource
         {
             // Use git log -g with a date window so we are never limited by a fixed entry count.
             // We scan from start-of-day to time+1h to capture any checkout on that day.
-            var after  = time.Date.AddDays(-1).ToString(GitDateFormat);  // day before as lower bound
-            var before = time.AddHours(1).ToString(GitDateFormat);        // time + 1h as upper bound
+            var after = time.Date.AddDays(-1).ToString(GitDateFormat);
+            var before = time.AddHours(1).ToString(GitDateFormat);
 
-            var output = await RunGitCommandAsync(
-                _defaultRepositoryPath,
+            // Try a date-scoped window first, then widen to the whole reflog
+            string[] queries =
+            [
                 $"log -g --format=%H|%gd|%gs --date=iso --after=\"{after}\" --before=\"{before}\" -n {MaxBranchLookupEntries}",
-                cancellationToken);
+                $"log -g --format=%H|%gd|%gs --date=iso -n {MaxBranchLookupEntries}"
+            ];
 
-            if (!string.IsNullOrWhiteSpace(output))
+            foreach (var query in queries)
             {
-                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                Log.Debug("GetBranchAtTimeAsync: {Count} reflog entries in date window for '{Repo}'",
-                    lines.Length, Path.GetFileName(_defaultRepositoryPath));
-
-                // Entries are newest-first; find the last checkout at or before 'time'
-                foreach (var line in lines)
+                var output = await RunGitCommandAsync(_defaultRepositoryPath, query, cancellationToken);
+                var branchName = FindCheckoutAtOrBefore(output, time);
+                if (branchName != null)
                 {
-                    if (!TryParseReflogLine(line, out var parsed) || parsed.Timestamp > time)
-                        continue;
-
-                    if (parsed.Action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var branchName = ExtractBranchNameFromCheckout(parsed.Action);
-                        if (!string.IsNullOrEmpty(branchName))
-                        {
-                            Log.Information("GetBranchAtTimeAsync: resolved branch '{Branch}' at {Time} (reflog entry at {EntryTime}) in '{Repo}'",
-                                branchName, time, parsed.Timestamp, Path.GetFileName(_defaultRepositoryPath));
-                            return branchName;
-                        }
-                    }
-                }
-
-                Log.Debug("GetBranchAtTimeAsync: no checkout entry found in date window, widening search");
-            }
-
-            // Fallback: scan a larger window (all reflog up to the target time)
-            var wideOutput = await RunGitCommandAsync(
-                _defaultRepositoryPath,
-                $"log -g --format=%H|%gd|%gs --date=iso -n {MaxBranchLookupEntries}",
-                cancellationToken);
-
-            if (!string.IsNullOrWhiteSpace(wideOutput))
-            {
-                var wideLines = wideOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                Log.Debug("GetBranchAtTimeAsync: wide search � {Count} total reflog entries in '{Repo}'",
-                    wideLines.Length, Path.GetFileName(_defaultRepositoryPath));
-
-                foreach (var line in wideLines)
-                {
-                    if (!TryParseReflogLine(line, out var parsed) || parsed.Timestamp > time)
-                        continue;
-
-                    if (parsed.Action.Contains("checkout", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var branchName = ExtractBranchNameFromCheckout(parsed.Action);
-                        if (!string.IsNullOrEmpty(branchName))
-                        {
-                            Log.Information("GetBranchAtTimeAsync: resolved branch '{Branch}' at {Time} via wide search (reflog entry at {EntryTime}) in '{Repo}'",
-                                branchName, time, parsed.Timestamp, Path.GetFileName(_defaultRepositoryPath));
-                            return branchName;
-                        }
-                    }
+                    Log.Information("GetBranchAtTimeAsync: resolved branch '{Branch}' at {Time} in '{Repo}'",
+                        branchName, time, Path.GetFileName(_defaultRepositoryPath));
+                    return branchName;
                 }
             }
 
@@ -917,20 +883,6 @@ public class GitEventSource : IEventSource
                 Path.GetFileName(_defaultRepositoryPath), time);
             return await GetCurrentBranchAsync(cancellationToken);
         }
-    }
-
-    /// <summary>
-    /// Get the ticket number from the branch that was active at a specific time
-    /// </summary>
-    public async Task<string?> GetBranchTicketNumberAtTimeAsync(DateTime time, CancellationToken cancellationToken = default)
-    {
-        var branchName = await GetBranchAtTimeAsync(time, cancellationToken);
-        if (string.IsNullOrWhiteSpace(branchName))
-            return null;
-
-        var ticketNumber = TicketParser.FromGitText(branchName);
-        Log.Debug("Branch at {Time}: {Branch}, Ticket: {Ticket}", time, branchName, ticketNumber ?? "none");
-        return ticketNumber;
     }
 
     /// <summary>

@@ -1,6 +1,4 @@
-@using FillMyADT.Models
-
-@if (IsLoading)
+﻿@if (IsLoading)
 {
     <div class="loading-container">
         <div class="spinner"></div>
@@ -242,36 +240,12 @@ else
         font-weight: 500;
     }
 
-    .no-events {
-        padding: 20px;
-        text-align: center;
-        color: #6c757d;
-        font-size: 13px;
-    }
-
-    .loading-container {
-        padding: 40px 20px;
-        text-align: center;
-        color: #6c757d;
-    }
-
-        .loading-container p {
-            margin-top: 15px;
-            font-size: 13px;
-        }
-
-    .spinner {
-        border: 3px solid #f3f3f3;
-        border-top: 3px solid #0078d4;
-        border-radius: 50%;
-        width: 40px;
-        height: 40px;
-        animation: spin 1s linear infinite;
-        margin: 0 auto;
-    }
-
-    @@keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-    }
+	/* Compact single-line rows */
+	.event-item { display: flex; align-items: center; gap: 8px; padding: 3px 8px; margin-bottom: 2px; min-height: 0; }
+	.event-time, .event-source-badge { white-space: nowrap; flex-shrink: 0; }
+	.event-details { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; overflow: hidden; }
+	.event-type { white-space: nowrap; flex-shrink: 0; margin: 0; }
+	.event-description { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; margin: 0; }
+	.event-metadata { display: flex; flex-wrap: nowrap; gap: 4px; margin: 0; flex-shrink: 0; }
+	.metadata-item { padding: 1px 6px; font-size: 0.75em; white-space: nowrap; }
 </style>

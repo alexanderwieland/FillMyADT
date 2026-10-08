@@ -79,24 +79,6 @@ public record TimeSlot
     public TimeSpan Duration => EndTime - StartTime;
 
     /// <summary>
-    /// Check if the time slot is valid (positive duration)
-    /// </summary>
-    public bool IsValid => Duration > TimeSpan.Zero;
-
-    /// <summary>
-    /// Format duration as human-readable string (e.g., "2h 30m")
-    /// </summary>
-    public string FormattedDuration
-    {
-        get
-        {
-            var hours = (int)Duration.TotalHours;
-            var minutes = Duration.Minutes;
-            return hours > 0 ? $"{hours}h {minutes}m" : $"{minutes}m";
-        }
-    }
-
-    /// <summary>
     /// Get CSS class for styling based on category
     /// </summary>
     public string CssClass => Category.GetCssClass();

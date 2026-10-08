@@ -5,10 +5,7 @@ namespace FillMyADT.Models.Configuration;
 /// </summary>
 public record OutlookEventSourceConfig : EventSourceConfig
 {
-    public OutlookEventSourceConfig() : base()
-    {
-        SourceType = "OutlookEventSource";
-    }
+    public OutlookEventSourceConfig() => SourceType = "OutlookEventSource";
 
     /// <summary>
     /// Whether to include Teams meetings

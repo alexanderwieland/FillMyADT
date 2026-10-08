@@ -44,17 +44,13 @@ public class ClipboardFormatterService
         var sb = new StringBuilder();
         sb.AppendLine($"=== Time Slots for {date:yyyy-MM-dd} ===");
 
-        var totalMinutes = timeSlots.Sum(s => s.Duration.TotalMinutes);
-        var totalHours = (int)(totalMinutes / 60);
-        var totalMins = (int)(totalMinutes % 60);
-        sb.AppendLine($"Total: {timeSlots.Count} slots, {totalHours}h {totalMins}m");
+        var totalDuration = TimeSpan.FromMinutes(timeSlots.Sum(s => s.Duration.TotalMinutes));
+        sb.AppendLine($"Total: {timeSlots.Count} slots, {TimeHelper.FormatDuration(totalDuration)}");
         sb.AppendLine();
 
         foreach (var slot in timeSlots)
         {
-            var durationStr = FormatDuration(slot.Duration);
-
-            sb.Append($"{slot.StartTime:HH:mm} - {slot.EndTime:HH:mm} ({durationStr})");
+            sb.Append($"{slot.StartTime:HH:mm} - {slot.EndTime:HH:mm} ({TimeHelper.FormatDuration(slot.Duration)})");
             if (!string.IsNullOrEmpty(slot.TicketNr))
                 sb.Append($" [{slot.TicketNr}]");
             if (!string.IsNullOrEmpty(slot.Source))
@@ -75,12 +71,5 @@ public class ClipboardFormatterService
         }
 
         return sb.ToString();
-    }
-
-    private static string FormatDuration(TimeSpan duration)
-    {
-        var hours = (int)duration.TotalHours;
-        var minutes = duration.Minutes;
-        return hours > 0 ? $"{hours}h {minutes}m" : $"{minutes}m";
     }
 }

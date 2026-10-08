@@ -1,188 +1,68 @@
-using FillMyADT.Models.Configuration;
+﻿using FillMyADT.Models.Configuration;
 using Serilog;
+using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace FillMyADT.Services;
 
 /// <summary>
-/// Service for managing application configuration stored in AppData
+/// Loads the application configuration stored in LocalAppData, creating a default file on first run.
 /// </summary>
 public class ConfigurationService
 {
     private static readonly ILogger Log = Serilog.Log.ForContext<ConfigurationService>();
 
-    private readonly string _configDirectory;
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter(), new EventSourceConfigConverter() }
+    };
+
     private readonly string _configFilePath;
-    private readonly JsonSerializerOptions _jsonOptions;
 
     public ConfigurationService()
     {
-        var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        _configDirectory = System.IO.Path.Combine(appDataPath, "FillMyADT");
-        _configFilePath = System.IO.Path.Combine(_configDirectory, "config.json");
-
-        _jsonOptions = new JsonSerializerOptions
-        {
-            WriteIndented = true,
-            PropertyNameCaseInsensitive = true,
-            Converters =
-            {
-                new JsonStringEnumConverter(),
-                new EventSourceConfigConverter()
-            }
-        };
-
-        EnsureConfigDirectoryExists();
+        var configDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FillMyADT");
+        Directory.CreateDirectory(configDirectory);
+        _configFilePath = Path.Combine(configDirectory, "config.json");
     }
 
     /// <summary>
-    /// Get the configuration directory path
+    /// Load the configuration, writing defaults first if no file exists. Falls back to defaults on errors.
     /// </summary>
-    public string ConfigDirectory => _configDirectory;
-
-    /// <summary>
-    /// Load configuration for a specific event source type
-    /// </summary>
-    public async Task<T?> LoadConfigAsync<T>(CancellationToken cancellationToken = default) where T : EventSourceConfig
+    public AppConfiguration Load()
     {
         try
         {
-            if (!System.IO.File.Exists(_configFilePath))
+            if (!File.Exists(_configFilePath))
             {
-                Log.Information("Configuration file not found, using defaults");
-                return null;
+                File.WriteAllText(_configFilePath, JsonSerializer.Serialize(CreateDefaultConfiguration(), JsonOptions));
+                Log.Information("Default configuration created at {Path}", _configFilePath);
             }
 
-            var json = await System.IO.File.ReadAllTextAsync(_configFilePath, cancellationToken).ConfigureAwait(false);
-            var config = JsonSerializer.Deserialize<AppConfiguration>(json, _jsonOptions);
-
-            if (config?.EventSources == null)
-                return null;
-
-            var sourceType = typeof(T).Name;
-            var sourceConfig = config.EventSources.FirstOrDefault(c => c.GetType().Name == sourceType);
-
-            return sourceConfig as T;
+            var config = JsonSerializer.Deserialize<AppConfiguration>(File.ReadAllText(_configFilePath), JsonOptions);
+            Log.Information("Configuration loaded from {Path}", _configFilePath);
+            return config ?? CreateDefaultConfiguration();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {
-            Log.Error(ex, "Error loading configuration for {SourceType}", typeof(T).Name);
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Save configuration for a specific event source
-    /// </summary>
-    public async Task SaveConfigAsync<T>(T config, CancellationToken cancellationToken = default) where T : EventSourceConfig
-    {
-        ArgumentNullException.ThrowIfNull(config);
-
-        try
-        {
-            var appConfig = await LoadAllConfigsAsync(cancellationToken).ConfigureAwait(false) ?? new AppConfiguration();
-
-            var existingIndex = appConfig.EventSources.FindIndex(c => c.SourceType == config.SourceType);
-            if (existingIndex >= 0)
-            {
-                appConfig.EventSources[existingIndex] = config;
-            }
-            else
-            {
-                appConfig.EventSources.Add(config);
-            }
-
-            var json = JsonSerializer.Serialize(appConfig, _jsonOptions);
-            await System.IO.File.WriteAllTextAsync(_configFilePath, json, cancellationToken).ConfigureAwait(false);
-
-            Log.Information("Configuration saved for {SourceType}", config.SourceType);
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Error saving configuration for {SourceType}", config.SourceType);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Load all configurations
-    /// </summary>
-    public async Task<AppConfiguration?> LoadAllConfigsAsync(CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            if (!System.IO.File.Exists(_configFilePath))
-            {
-                return CreateDefaultConfiguration();
-            }
-
-            var json = await System.IO.File.ReadAllTextAsync(_configFilePath, cancellationToken).ConfigureAwait(false);
-            return JsonSerializer.Deserialize<AppConfiguration>(json, _jsonOptions);
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Error loading all configurations");
+            Log.Error(ex, "Error loading configuration, using defaults");
             return CreateDefaultConfiguration();
         }
     }
 
-    /// <summary>
-    /// Initialize configuration file with defaults if it doesn't exist
-    /// </summary>
-    public async Task InitializeDefaultConfigAsync(CancellationToken cancellationToken = default)
+    private static AppConfiguration CreateDefaultConfiguration() => new()
     {
-        if (System.IO.File.Exists(_configFilePath))
-        {
-            Log.Information("Configuration file already exists at {Path}", _configFilePath);
-            return;
-        }
-
-        var defaultConfig = CreateDefaultConfiguration();
-        var json = JsonSerializer.Serialize(defaultConfig, _jsonOptions);
-        await System.IO.File.WriteAllTextAsync(_configFilePath, json, cancellationToken).ConfigureAwait(false);
-
-        Log.Information("Default configuration created at {Path}", _configFilePath);
-    }
-
-    private AppConfiguration CreateDefaultConfiguration()
-    {
-        return new AppConfiguration
-        {
-            EventSources =
-            [
-                new WindowsEventSourceConfig
-                {
-                    IsEnabled = true
-                },
-                new GitEventSourceConfig
-                {
-                    IsEnabled = true,
-                    AutoDiscoverRepositories = true,
-                    ScanDirectory = @"E:\Work\Sync\Git\",
-                    FilterByRecentActivity = true,
-                    IncludeCommits = true,
-                    IncludeBranchSwitches = true
-                },
-                new OutlookEventSourceConfig
-                {
-                    IsEnabled = true,
-                    RequireRunningInstance = false,
-                    IncludeTeamsMeetings = true,
-                    IncludeAllDayEvents = false
-                }
-            ]
-        };
-    }
-
-    private void EnsureConfigDirectoryExists()
-    {
-        if (!System.IO.Directory.Exists(_configDirectory))
-        {
-            System.IO.Directory.CreateDirectory(_configDirectory);
-            Log.Information("Configuration directory created at {Path}", _configDirectory);
-        }
-    }
+        EventSources =
+        [
+            new WindowsEventSourceConfig(),
+            new GitEventSourceConfig { ScanDirectory = @"C:\Work\Sync\Git\" },
+            new OutlookEventSourceConfig()
+        ]
+    };
 }
 
 /// <summary>
@@ -209,6 +89,12 @@ public class AppConfiguration
     /// Event source configurations
     /// </summary>
     public List<EventSourceConfig> EventSources { get; set; } = [];
+
+    /// <summary>
+    /// Get the configuration for an event source type, or its defaults if not configured
+    /// </summary>
+    public T GetSourceConfig<T>() where T : EventSourceConfig, new() =>
+        EventSources.OfType<T>().FirstOrDefault() ?? new T();
 }
 
 /// <summary>

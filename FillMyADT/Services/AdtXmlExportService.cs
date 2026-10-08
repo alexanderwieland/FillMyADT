@@ -1,4 +1,4 @@
-using FillMyADT.Models;
+﻿using FillMyADT.Models;
 using Serilog;
 using System.IO;
 using System.Xml.Linq;
@@ -134,8 +134,8 @@ public class AdtXmlExportService
             new XElement("Datum", entry.Datum.ToString("yyyy-MM-ddTHH:mm:sszzz")),
             new XElement("Beginn", entry.Beginn),
             new XElement("Ende", entry.Ende),
-            new XElement("Dauer", entry.Dauer.ToString("F2").Replace(',', '.')),
-            new XElement("DauerWV", entry.Dauer.ToString("F2").Replace(',', '.')),
+            new XElement("Dauer", entry.Dauer.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)),
+            new XElement("DauerWV", entry.Dauer.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)),
             new XElement("Ort", entry.Ort),
             new XElement("Betrieb", entry.Betrieb),
             new XElement("Projekt", entry.Projekt),
