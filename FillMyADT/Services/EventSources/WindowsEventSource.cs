@@ -31,6 +31,8 @@ public class WindowsEventSource : IEventSource
     private static readonly TimeSpan MinLunchIdle = TimeSpan.FromMinutes(10);
     // Idle gaps (other than lunch) at least this long are reported as shutdown + boot, e.g. commuting home
     private static readonly TimeSpan MinOffPeriod = TimeSpan.FromMinutes(60);
+    // Only gaps starting this late count as off periods (left the office); daytime standby (meetings, away from desk) does not
+    private static readonly TimeSpan OffPeriodEarliestStart = TimeSpan.FromHours(16);
     private const int MinBreakMinutes = 30;
     private const int MaxBreakMinutes = 60;
 
@@ -56,17 +58,7 @@ public class WindowsEventSource : IEventSource
             try
             {
                 var transitions = ReadTransitions(startDate, endDate, cancellationToken);
-
-                foreach (var day in transitions.GroupBy(t => t.Time.Date).OrderBy(g => g.Key))
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    // Ignore night-time activity (updates, maintenance wake-ups) before 06:00
-                    var dayTransitions = day
-                        .Where(t => t.Time.TimeOfDay >= DayStart)
-                        .OrderBy(t => t.Time)
-                        .ToList();
-                    events.AddRange(CreateDayEvents(day.Key, dayTransitions));
-                }
+                events.AddRange(CreateEventsFromTransitions(transitions, cancellationToken));
 
                 Log.Information("Found {EventCount} daily skeleton events (Boot/Lunch/Shutdown)", events.Count);
             }
@@ -95,7 +87,31 @@ public class WindowsEventSource : IEventSource
         }
     }
 
-    private enum Transition { None, Sleep, Wake }
+    /// <summary>
+    /// Power state change read from the System event log
+    /// </summary>
+    public enum Transition { None, Sleep, Wake }
+
+    /// <summary>
+    /// Build the daily skeleton events (Boot/Lunch/Shutdown) from power transitions, grouped per day
+    /// </summary>
+    public IReadOnlyList<Event> CreateEventsFromTransitions(IEnumerable<(DateTime Time, Transition Kind)> transitions, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transitions);
+
+        var events = new List<Event>();
+        foreach (var day in transitions.GroupBy(t => t.Time.Date).OrderBy(g => g.Key))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // Ignore night-time activity (updates, maintenance wake-ups) before 06:00
+            var dayTransitions = day
+                .Where(t => t.Time.TimeOfDay >= DayStart)
+                .OrderBy(t => t.Time)
+                .ToList();
+            events.AddRange(CreateDayEvents(day.Key, dayTransitions));
+        }
+        return events.OrderBy(e => e.Timestamp).ToList();
+    }
 
     /// <summary>
     /// Sleep: Kernel-Power 42 (sleep), 506 (modern standby entered), 109 (shutdown), Kernel-General 13 (OS shutdown).
@@ -200,7 +216,7 @@ public class WindowsEventSource : IEventSource
 
         var offPeriods = meaningful
             .Zip(meaningful.Skip(1), (a, b) => (Start: a.End!.Value, End: b.Start))
-            .Where(g => g != lunchGap && g.End - g.Start >= MinOffPeriod);
+            .Where(g => g != lunchGap && g.Start.TimeOfDay >= OffPeriodEarliestStart && g.End - g.Start >= MinOffPeriod);
         foreach (var (offStart, offEnd) in offPeriods)
         {
             Log.Debug("{Date}: off period {Start:HH:mm}-{End:HH:mm}", date.ToString("yyyy-MM-dd"), offStart, offEnd);

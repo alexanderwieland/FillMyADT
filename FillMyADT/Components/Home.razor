@@ -9,9 +9,20 @@
 <div class="home-container">
     <div class="page-header">
         <h1>Daily Activity Tracker</h1>
-        <a class="btn" href="/settings" title="Settings">⚙️ Settings</a>
+        <div class="header-actions">
+            @if (availableSources != null)
+            {
+                <span class="source-icons">
+                    @foreach (var source in availableSources)
+                    {
+                        <img class="source-icon" src="@GetSourceIcon(source)" alt="@source" title="@source" />
+                    }
+                </span>
+            }
+            <a class="btn" href="/settings" title="Settings">⚙️ Settings</a>
+        </div>
     </div>
-    <p>Track your daily activities from Windows events and Git history</p>
+    <p>Track your daily activities and export them to ADT</p>
 
     <div class="controls">
         <!-- Date Navigation Section -->
@@ -55,13 +66,6 @@
         </div>
     }
 
-    @if (availableSources != null && availableSources.Any())
-    {
-        <div class="sources-info">
-            <strong>Active Sources:</strong> @string.Join(", ", availableSources)
-        </div>
-    }
-
     <div class="view-switcher">
         <button class="view-btn @(currentView == ViewMode.Events ? "active" : "")" @onclick="() => currentView = ViewMode.Events">
             📋 Events
@@ -102,6 +106,16 @@
     private IReadOnlyList<AdtExportEntry> exportPreview = [];
     private int excludedCount;
     private IEnumerable<string>? availableSources;
+
+    private static string GetSourceIcon(string source) => source switch
+    {
+        "Windows Events" => "img/sources/windows.svg",
+        "Git History" => "img/sources/git.svg",
+        "Outlook Calendar" => "img/sources/outlook.svg",
+        "Edge Browser" => "img/sources/edge.svg",
+        _ => "img/sources/windows.svg"
+    };
+
     private bool isLoading;
     private string? errorMessage;
     private CancellationTokenSource? _loadCancellationTokenSource;

@@ -61,6 +61,7 @@ namespace FillMyADT
         {
             base.OnClosed(e);
             LoggingService.CloseLogging();
+            Application.Current.Shutdown();
         }
     }
 }

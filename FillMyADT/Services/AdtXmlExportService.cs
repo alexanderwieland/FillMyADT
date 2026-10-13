@@ -1,4 +1,4 @@
-﻿using FillMyADT.Models;
+using FillMyADT.Models;
 using Serilog;
 using System.IO;
 using System.Xml.Linq;
@@ -70,19 +70,24 @@ public class AdtXmlExportService
         // Create XML document
         var xml = CreateAdtXml(timeSlots, date);
 
-        // Save to file
-        await File.WriteAllTextAsync(filePath, xml.ToString(), cancellationToken);
+        // Save to file (XDocument.ToString() would drop the XML declaration)
+        await using (var stream = File.Create(filePath))
+        {
+            await xml.SaveAsync(stream, SaveOptions.None, cancellationToken);
+        }
 
-        Log.Information("Exported {Count} time slots to ADT XML: {FilePath}", timeSlots.Count, filePath);
+        Log.Information("Exported {Count} entries to ADT XML: {FilePath}", xml.Root!.Elements().Count(), filePath);
 
         return filePath;
     }
 
     /// <summary>
-    /// Create ADT XML document from time slots
+    /// Create ADT XML document from time slots (breaks are skipped)
     /// </summary>
-    private XDocument CreateAdtXml(IReadOnlyList<TimeSlot> timeSlots, DateTime date)
+    public XDocument CreateAdtXml(IReadOnlyList<TimeSlot> timeSlots, DateTime date)
     {
+        ArgumentNullException.ThrowIfNull(timeSlots);
+
         return new XDocument(
             new XDeclaration("1.0", "utf-8", "yes"),
             new XElement("NewDataSet", GetExportPreview(timeSlots, date).Select(CreateAdoffenElement))
@@ -134,10 +139,10 @@ public class AdtXmlExportService
         );
     }
 
-    #region Field Mapping Logic - ADAPT AS NEEDED
+    #region Field Mapping Logic
 
     /// <summary>
-    /// Get location code (Ort) - ADAPT AS NEEDED
+    /// Get location code (Ort)
     /// </summary>
     private Location GetOrt(TimeSlot slot)
     {
@@ -153,17 +158,11 @@ public class AdtXmlExportService
     }
 
     /// <summary>
-    /// Get company/operation (Betrieb) - DEFAULT LOGIC, ADAPT AS NEEDED
+    /// Get company/operation (Betrieb)
     /// </summary>
     private string GetBetrieb(TimeSlot slot)
     {
-        // TODO: Add your custom logic here
-        // Examples:
-        // - Extract from metadata
-        // - Map based on project/ticket
-        // - Use default value
-
-        if (GetOrt(slot) == Location.ABW || slot.Category == TimeSlotCategory.Startup || slot.Category == TimeSlotCategory.Meeting)
+        if (GetOrt(slot) == Location.ABW || slot.Category == TimeSlotCategory.Startup)
         {
             return "MP2";
         }
@@ -175,20 +174,27 @@ public class AdtXmlExportService
             return "INFG"; // TODO Check Text for Betrieb Name
         }
 
-        return "INFG"; // TODO Load Default Company
+        if (slot.Category == TimeSlotCategory.Meeting && slot.Text.ToLowerInvariant().Contains("nuhr"))
+        {
+            return "NUHR";
+        }
+        else if (slot.Category == TimeSlotCategory.Meeting && slot.Text.ToLowerInvariant().Contains("bd2"))
+        {
+            return "BD2";
+        }
+        else if (slot.Category == TimeSlotCategory.Meeting)
+        {
+            return "MP2";
+        }
+
+        return "INFG";
     }
 
     /// <summary>
-    /// Get project code (Projekt) - DEFAULT LOGIC, ADAPT AS NEEDED
+    /// Get project code (Projekt)
     /// </summary>
     private string GetProjekt(TimeSlot slot)
     {
-        // TODO: Add your custom logic here
-        // Examples:
-        // - Use ticket number if available
-        // - Map category to project codes
-        // - Extract from metadata
-
         // Special handling for absence categories
         if (slot.Category == TimeSlotCategory.Urlaub)
         {
@@ -205,7 +211,15 @@ public class AdtXmlExportService
             return "02-ORGA-Divers";
         }
 
-        if (slot.Category == TimeSlotCategory.Meeting)
+        if (slot.Category == TimeSlotCategory.Meeting && slot.Text.ToLowerInvariant().Contains("nuhr"))
+        {
+            return "#37004";
+        }
+        else if (slot.Category == TimeSlotCategory.Meeting && slot.Text.ToLowerInvariant().Contains("bd2"))
+        {
+            return "#41701";
+        }
+        else if (slot.Category == TimeSlotCategory.Meeting)
         {
             return "01-DEV-interneAbstimmungen";
         }
@@ -215,12 +229,12 @@ public class AdtXmlExportService
             return "#23755";
         }
 
-        // Use ticket number if available, otherwise default
-        if (!string.IsNullOrEmpty(slot.TicketNr))
+        // Use ticket number if available; several tickets can't be booked on one project
+        if (!string.IsNullOrEmpty(slot.TicketNr) && !slot.TicketNr.Contains(','))
         {
             return slot.TicketNr;
         }
-        if (slot.Category == TimeSlotCategory.Work)
+        if (slot.Category == TimeSlotCategory.Work || !string.IsNullOrEmpty(slot.TicketNr))
         {
             return "MIMWART";
         }
@@ -229,16 +243,10 @@ public class AdtXmlExportService
     }
 
     /// <summary>
-    /// Get documentation text (Dokumentation) - DEFAULT LOGIC, ADAPT AS NEEDED
+    /// Get documentation text (Dokumentation)
     /// </summary>
     private string GetDokumentation(TimeSlot slot)
     {
-        // TODO: Add your custom logic here
-        // Examples:
-        // - Shorten/format the text
-        // - Use category-specific defaults
-        // - Extract from metadata
-
         // Special handling for absence categories
         if (slot.Category == TimeSlotCategory.Urlaub)
         {

@@ -22,6 +22,7 @@ public class ConfigurationService
     };
 
     private readonly string _configFilePath;
+    private readonly bool _isPersistent = true;
 
     public ConfigurationService()
     {
@@ -30,6 +31,17 @@ public class ConfigurationService
         Directory.CreateDirectory(configDirectory);
         _configFilePath = Path.Combine(configDirectory, "config.json");
         Current = Load();
+    }
+
+    /// <summary>
+    /// Create an in-memory configuration service that never reads or writes the config file
+    /// </summary>
+    public ConfigurationService(AppConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        _configFilePath = string.Empty;
+        _isPersistent = false;
+        Current = Clone(configuration);
     }
 
     /// <summary>
@@ -65,8 +77,11 @@ public class ConfigurationService
         ArgumentNullException.ThrowIfNull(configuration);
 
         var snapshot = Clone(configuration);
-        File.WriteAllText(_configFilePath, JsonSerializer.Serialize(snapshot, JsonOptions));
-        Log.Information("Configuration saved to {Path}", _configFilePath);
+        if (_isPersistent)
+        {
+            File.WriteAllText(_configFilePath, JsonSerializer.Serialize(snapshot, JsonOptions));
+            Log.Information("Configuration saved to {Path}", _configFilePath);
+        }
 
         Current = snapshot;
         Changed?.Invoke(snapshot);
